@@ -27,7 +27,8 @@ const LEGACY_EXCEL_EXTENSIONS: string[] = ['xls', 'xlt'];
 const LEGACY_POWERPOINT_EXTENSIONS: string[] = ['ppt', 'pps', 'pot'];
 const AV_EXTENSIONS: string[] = ['mp4', 'mov', 'm4v', '3gp', 'mkv', 'webm',
   'mp3', 'm4a', 'wav', 'aac', 'flac', 'ogg', 'amr'];
-const IMAGE_EXTENSIONS: string[] = ['jpg', 'jpeg', 'png', 'heif', 'heic', 'webp', 'gif', 'bmp'];
+const IMAGE_EXTENSIONS: string[] = ['jpg', 'jpeg', 'png', 'heif', 'heic', 'webp', 'gif', 'bmp',
+  'tif', 'tiff', 'dng'];
 
 const PDF_UTD: string = 'com.adobe.pdf';
 const WORD_UTD: string = 'org.openxmlformats.wordprocessingml.document';
@@ -145,6 +146,8 @@ export class FileTypeRouter {
     if (extension === 'flac') return 'audio/flac';
     if (extension === 'ogg') return 'audio/ogg';
     if (extension === 'amr') return 'audio/amr';
+    if (extension === 'tif' || extension === 'tiff') return 'image/tiff';
+    if (extension === 'dng') return 'image/x-adobe-dng';
     if (extension === 'docm') return 'application/vnd.ms-word.document.macroEnabled.12';
     if (extension === 'dotx') return 'application/vnd.openxmlformats-officedocument.wordprocessingml.template';
     if (extension === 'dotm') return 'application/vnd.ms-word.template.macroEnabled.12';
@@ -161,6 +164,8 @@ export class FileTypeRouter {
 
   static utdForUri(uri: string, kind: FileKind = FileKind.UNKNOWN): string {
     const extension: string = FileTypeRouter.extensionOf(uri);
+    if (extension === 'tif' || extension === 'tiff') return 'general.tiff';
+    if (extension === 'dng') return 'com.adobe.dng-raw-image';
     if (extension === 'docm') return 'org.openxmlformats.wordprocessingml.document.macroenabled';
     if (extension === 'dotx') return 'org.openxmlformats.wordprocessingml.template';
     if (extension === 'dotm') return 'org.openxmlformats.wordprocessingml.template.macroenabled';

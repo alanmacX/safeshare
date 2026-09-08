@@ -122,7 +122,12 @@ export class OoxmlFamilyTool {
       const xml: string = await this.entryXml(entries[customIndex], bytes);
       this.collectCustomFindings(findings, xml);
     }
-    return new PrivacyScanResult('', findings);
+    const result: PrivacyScanResult = new PrivacyScanResult('', findings);
+    if (this.hasProtectedPackage(entries)) {
+      result.readOnlyTool = true;
+      result.capabilityWarnings = ['文件包含数字签名或权限保护部件；修改属性会破坏签名或访问控制，已阻止生成副本'];
+    }
+    return result;
   }
 
   /**
@@ -134,6 +139,7 @@ export class OoxmlFamilyTool {
     Promise<OoxmlSanitizeOutcome> {
     const bytes: Uint8Array = await this.readSourceBytes(uri);
     const entries: ZipEntry[] = ZipContainer.readEntries(bytes);
+    if (this.hasProtectedPackage(entries)) throw new Error('PROTECTED_OFFICE_PACKAGE');
     const rewritten: Map<string, Uint8Array> = new Map();
     // Findings the user kept in the result page arrive as preserveSubtypes;
     // those properties must survive into the sanitized copy.
@@ -164,8 +170,11 @@ export class OoxmlFamilyTool {
     // still produce the copy as a byte-faithful container rebuild so one
     // fully-kept document never fails an otherwise valid batch.
     const outputBytes: Uint8Array = ZipContainer.assemble(bytes, entries, rewritten);
+    const packageExtension: string = await this.extensionForPackage(entries, bytes);
+    const outputName: string = this.outputNameWithExtension(
+      this.sourceName.length > 0 ? this.sourceName : uri, packageExtension);
     const outputPath: string = this.tempFiles.createOutputPath(
-      this.sourceName.length > 0 ? this.sourceName : uri, this.extensionForKind());
+      outputName, packageExtension);
     let verification: PrivacyScanResult;
     try {
       await ZipContainer.writeFileBytes(outputPath, outputBytes);
@@ -201,6 +210,49 @@ export class OoxmlFamilyTool {
     if (this.kind === FileKind.EXCEL) return 'xlsx';
     if (this.kind === FileKind.POWERPOINT) return 'pptx';
     return 'docx';
+  }
+
+  private outputNameWithExtension(name: string, extension: string): string {
+    let value: string = name;
+    const query: number = value.indexOf('?');
+    if (query >= 0) value = value.substring(0, query);
+    const slash: number = value.lastIndexOf('/');
+    const dot: number = value.lastIndexOf('.');
+    if (dot > slash) value = value.substring(0, dot);
+    return `${value}.${extension}`;
+  }
+
+  private async extensionForPackage(entries: ZipEntry[], bytes: Uint8Array): Promise<string> {
+    const index: number = this.indexOfEntry(entries, '[Content_Types].xml');
+    if (index < 0) return this.extensionForKind();
+    const contentTypes: string = (await this.entryXml(entries[index], bytes)).toLowerCase();
+    if (this.kind === FileKind.WORD) {
+      if (contentTypes.indexOf('application/vnd.ms-word.template.macroenabled.main+xml') >= 0) return 'dotm';
+      if (contentTypes.indexOf('application/vnd.ms-word.document.macroenabled.main+xml') >= 0) return 'docm';
+      if (contentTypes.indexOf('wordprocessingml.template.main+xml') >= 0) return 'dotx';
+      return 'docx';
+    }
+    if (this.kind === FileKind.EXCEL) {
+      if (contentTypes.indexOf('application/vnd.ms-excel.template.macroenabled.main+xml') >= 0) return 'xltm';
+      if (contentTypes.indexOf('application/vnd.ms-excel.sheet.macroenabled.main+xml') >= 0) return 'xlsm';
+      if (contentTypes.indexOf('spreadsheetml.template.main+xml') >= 0) return 'xltx';
+      return 'xlsx';
+    }
+    if (contentTypes.indexOf('application/vnd.ms-powerpoint.slideshow.macroenabled.main+xml') >= 0) return 'ppsm';
+    if (contentTypes.indexOf('application/vnd.ms-powerpoint.template.macroenabled.main+xml') >= 0) return 'potm';
+    if (contentTypes.indexOf('application/vnd.ms-powerpoint.presentation.macroenabled.main+xml') >= 0) return 'pptm';
+    if (contentTypes.indexOf('presentationml.slideshow.main+xml') >= 0) return 'ppsx';
+    if (contentTypes.indexOf('presentationml.template.main+xml') >= 0) return 'potx';
+    return 'pptx';
+  }
+
+  private hasProtectedPackage(entries: ZipEntry[]): boolean {
+    for (let index: number = 0; index < entries.length; index++) {
+      const name: string = entries[index].name.toLowerCase();
+      if (name.startsWith('_xmlsignatures/') || name.startsWith('drm/') ||
+        name === 'encryptioninfo' || name === 'encryptedpackage') return true;
+    }
+    return false;
   }
 
   private async readSourceBytes(uri: string): Promise<Uint8Array> {

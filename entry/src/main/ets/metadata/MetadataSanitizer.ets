@@ -9,6 +9,9 @@ import { TempFileManager } from '../storage/TempFileManager';
 import { MetadataMode, MetadataPolicy } from './MetadataPolicy';
 import { PurposeWatermark } from '../privacy/PurposeWatermark';
 import { GifMetadata, GifMetadataSummary } from './GifMetadata';
+import { ContainerMetadata, ContainerMetadataSummary } from './ContainerMetadata';
+import { JpegMetadata } from './JpegMetadata';
+import { TiffMetadata, TiffMetadataSummary } from './TiffMetadata';
 
 import { runRedaction } from '../privacy/RedactionTask';
 import { hilog } from '@kit.PerformanceAnalysisKit';
@@ -50,10 +53,62 @@ export class MetadataSanitizer {
     try {
       sourceFile = await fileIo.open(uri, fileIo.OpenMode.READ_ONLY);
       flowLog('img_open_source');
-      source = image.createImageSource(sourceFile.fd);
-      const sourceInfo: image.ImageInfo = await source.getImageInfo();
       const hasVisualEdit: boolean = actions.length > 0 || policy.purposeWatermark.trim().length > 0 ||
         policy.imageWatermarkUri.length > 0;
+      if (!hasVisualEdit) {
+        const containerBytes: Uint8Array = await this.readFileBytes(sourceFile);
+        let sourceName: string = uri;
+        try { sourceName = sourceFile.name; } catch (_) {}
+        if (GifMetadata.isGif(containerBytes)) {
+          outputPath = manager.createOutputPath(sourceName, 'gif');
+          const cleaned: Uint8Array = GifMetadata.sanitize(containerBytes);
+          await this.writeFileBytes(outputPath, cleaned);
+          const outputUri: string = fileUri.getUriFromPath(outputPath);
+          const verification = await this.scanner.scan(outputUri);
+          if (verification.findings.length > 0) throw new Error('GIF metadata remained after cleaning.');
+          const sanitized = new SanitizedFile(outputPath, outputUri, verification, 'general.gif', 'image/gif');
+          sanitized.byteSize = cleaned.length;
+          return sanitized;
+        }
+        if (ContainerMetadata.isWebp(containerBytes)) {
+          outputPath = manager.createOutputPath(sourceName, 'webp');
+          const cleaned: Uint8Array = ContainerMetadata.sanitizeWebp(containerBytes);
+          await this.writeFileBytes(outputPath, cleaned);
+          const outputUri: string = fileUri.getUriFromPath(outputPath);
+          const verification = await this.scanner.scan(outputUri);
+          if (verification.findings.length > 0) throw new Error('WebP metadata remained after cleaning.');
+          const sanitized = new SanitizedFile(outputPath, outputUri, verification, 'com.google.webp', 'image/webp');
+          sanitized.byteSize = cleaned.length;
+          return sanitized;
+        }
+        if (TiffMetadata.isClassicTiff(containerBytes)) {
+          const dng: boolean = TiffMetadata.isDng(containerBytes) || sourceName.toLowerCase().endsWith('.dng');
+          outputPath = manager.createOutputPath(sourceName, dng ? 'dng' : 'tiff');
+          const cleaned: Uint8Array = TiffMetadata.sanitize(containerBytes);
+          await this.writeFileBytes(outputPath, cleaned);
+          const outputUri: string = fileUri.getUriFromPath(outputPath);
+          const verification = await this.scanner.scan(outputUri);
+          if (verification.findings.length > 0) throw new Error('TIFF/DNG metadata remained after cleaning.');
+          const sanitized = new SanitizedFile(outputPath, outputUri, verification,
+            dng ? 'com.adobe.dng-raw-image' : 'general.tiff',
+            dng ? 'image/x-adobe-dng' : 'image/tiff');
+          sanitized.byteSize = cleaned.length;
+          return sanitized;
+        }
+        if (containerBytes.length >= 2 && containerBytes[0] === 0x42 && containerBytes[1] === 0x4D) {
+          outputPath = manager.createOutputPath(sourceName, 'bmp');
+          await this.writeFileBytes(outputPath, containerBytes);
+          const outputUri: string = fileUri.getUriFromPath(outputPath);
+          const verification = await this.scanner.scan(outputUri);
+          if (verification.findings.length > 0) throw new Error('Unexpected BMP metadata finding.');
+          const sanitized = new SanitizedFile(outputPath, outputUri, verification, 'com.microsoft.bmp', 'image/bmp');
+          sanitized.byteSize = containerBytes.length;
+          return sanitized;
+        }
+        fileIo.lseek(sourceFile.fd, 0, fileIo.WhenceType.SEEK_SET);
+      }
+      source = image.createImageSource(sourceFile.fd);
+      const sourceInfo: image.ImageInfo = await source.getImageInfo();
       let frameCount: number = 1;
       try { frameCount = await source.getFrameCount(); } catch (_) {}
       if (sourceInfo.mimeType === 'image/gif') {
@@ -85,7 +140,54 @@ export class MetadataSanitizer {
         flowLog('gif_metadata_copy_done', `frames=${frameCount}`);
         return sanitized;
       }
-      if (frameCount > 1) throw new Error('MULTI_FRAME_IMAGE');
+      if (sourceInfo.mimeType === 'image/webp' && !hasVisualEdit) {
+        let sourceName: string = uri;
+        try { sourceName = sourceFile.name; } catch (_) {}
+        outputPath = manager.createOutputPath(sourceName, 'webp');
+        const inputBytes: Uint8Array = await this.readFileBytes(sourceFile);
+        const cleaned: Uint8Array = ContainerMetadata.sanitizeWebp(inputBytes);
+        await this.writeFileBytes(outputPath, cleaned);
+        const containerVerification: ContainerMetadataSummary = ContainerMetadata.inspectWebp(cleaned);
+        if (containerVerification.exifCount !== 0 || containerVerification.xmpCount !== 0) {
+          throw new Error('WebP metadata verification failed.');
+        }
+        const outputUri: string = fileUri.getUriFromPath(outputPath);
+        const verification = await this.scanner.scan(outputUri);
+        if (verification.findings.length > 0) throw new Error('WebP metadata remained after cleaning.');
+        const sanitized = new SanitizedFile(outputPath, outputUri, verification, 'com.google.webp', 'image/webp');
+        sanitized.pixelWidth = sourceInfo.size.width;
+        sanitized.pixelHeight = sourceInfo.size.height;
+        sanitized.byteSize = cleaned.length;
+        flowLog('webp_metadata_copy_done', `frames=${frameCount}`);
+        return sanitized;
+      }
+      const tiffLike: boolean = sourceInfo.mimeType === 'image/tiff' ||
+        sourceInfo.mimeType === 'image/x-adobe-dng' || sourceInfo.mimeType === 'image/dng';
+      if (tiffLike && !hasVisualEdit) {
+        let sourceName: string = uri;
+        try { sourceName = sourceFile.name; } catch (_) {}
+        const dng: boolean = sourceInfo.mimeType.indexOf('dng') >= 0 || sourceName.toLowerCase().endsWith('.dng');
+        outputPath = manager.createOutputPath(sourceName, dng ? 'dng' : 'tiff');
+        const cleaned: Uint8Array = TiffMetadata.sanitize(await this.readFileBytes(sourceFile));
+        await this.writeFileBytes(outputPath, cleaned);
+        const containerVerification: TiffMetadataSummary = TiffMetadata.inspect(cleaned);
+        if (containerVerification.privacyTagCount !== 0 || containerVerification.gpsDirectoryCount !== 0 ||
+          containerVerification.xmpIptcCount !== 0) throw new Error('TIFF/DNG metadata verification failed.');
+        const outputUri: string = fileUri.getUriFromPath(outputPath);
+        const verification = await this.scanner.scan(outputUri);
+        if (verification.findings.length > 0) throw new Error('TIFF/DNG metadata remained after cleaning.');
+        const sanitized = new SanitizedFile(outputPath, outputUri, verification,
+          dng ? 'com.adobe.dng-raw-image' : 'general.tiff',
+          dng ? 'image/x-adobe-dng' : 'image/tiff');
+        sanitized.pixelWidth = sourceInfo.size.width;
+        sanitized.pixelHeight = sourceInfo.size.height;
+        sanitized.byteSize = cleaned.length;
+        flowLog('tiff_metadata_copy_done', `dng=${dng ? 1 : 0}`);
+        return sanitized;
+      }
+      const losslessHeifSequence: boolean = frameCount > 1 && !hasVisualEdit &&
+        (sourceInfo.mimeType === 'image/heif' || sourceInfo.mimeType === 'image/heic');
+      if (frameCount > 1 && !losslessHeifSequence) throw new Error('MULTI_FRAME_IMAGE');
       flowLog('img_source_info');
       await this.collectPreservedMetadata(source, policy, preserved);
       flowLog('img_collect_props');
@@ -100,7 +202,24 @@ export class MetadataSanitizer {
       // HDR gain maps and other auxiliary images owned by the system camera.
       if (!hasVisualEdit && this.supportsInPlaceMetadata(sourceInfo.mimeType)) {
         await this.copySourceToPath(sourceFile, outputPath);
+        let jpegProtected: Uint8Array | undefined = undefined;
+        if (sourceInfo.mimeType === 'image/png') {
+          const copied: Uint8Array = await this.readPathBytes(outputPath);
+          await this.writeFileBytes(outputPath, ContainerMetadata.sanitizePng(copied));
+        } else if (sourceInfo.mimeType === 'image/jpeg') {
+          const copied: Uint8Array = await this.readPathBytes(outputPath);
+          const cleaned: Uint8Array = JpegMetadata.sanitize(copied);
+          jpegProtected = JpegMetadata.protectedMediaBytes(cleaned);
+          await this.writeFileBytes(outputPath, cleaned);
+        }
         await this.applyMetadataPolicyInPlace(outputPath, policy, preserved);
+        if (jpegProtected !== undefined) {
+          const afterExifWrite: Uint8Array = JpegMetadata.protectedMediaBytes(
+            await this.readPathBytes(outputPath));
+          if (!this.sameBytes(jpegProtected, afterExifWrite)) {
+            throw new Error('JPEG media or HDR payload changed during metadata editing.');
+          }
+        }
         const outputUri: string = fileUri.getUriFromPath(outputPath);
         const verification = await this.scanner.scan(outputUri);
         if (this.hasUnexpectedMetadata(verification.findings, policy) ||
@@ -198,7 +317,43 @@ export class MetadataSanitizer {
 
   private supportsInPlaceMetadata(mimeType: string): boolean {
     return mimeType === 'image/jpeg' || mimeType === 'image/png' ||
-      mimeType === 'image/heif' || mimeType === 'image/heic' || mimeType === 'image/webp';
+      mimeType === 'image/heif' || mimeType === 'image/heic';
+  }
+
+  private async readFileBytes(source: fileIo.File): Promise<Uint8Array> {
+    const size: number = fileIo.statSync(source.fd).size;
+    fileIo.lseek(source.fd, 0, fileIo.WhenceType.SEEK_SET);
+    const buffer: ArrayBuffer = new ArrayBuffer(size);
+    const read: number = await fileIo.read(source.fd, buffer);
+    if (read !== size) throw new Error('Short image container read.');
+    return new Uint8Array(buffer);
+  }
+
+  private async readPathBytes(path: string): Promise<Uint8Array> {
+    const source: fileIo.File = await fileIo.open(path, fileIo.OpenMode.READ_ONLY);
+    try {
+      return await this.readFileBytes(source);
+    } finally {
+      try { fileIo.closeSync(source); } catch (_) {}
+    }
+  }
+
+  private async writeFileBytes(path: string, bytes: Uint8Array): Promise<void> {
+    const target: fileIo.File = await fileIo.open(path,
+      fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
+    try {
+      await fileIo.write(target.fd, bytes.buffer);
+    } finally {
+      try { fileIo.closeSync(target); } catch (_) {}
+    }
+  }
+
+  private sameBytes(first: Uint8Array, second: Uint8Array): boolean {
+    if (first.length !== second.length) return false;
+    for (let index: number = 0; index < first.length; index++) {
+      if (first[index] !== second[index]) return false;
+    }
+    return true;
   }
 
   private async copySourceToPath(source: fileIo.File, outputPath: string): Promise<void> {

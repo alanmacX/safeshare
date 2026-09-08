@@ -2,6 +2,9 @@ import { image } from '@kit.ImageKit';
 import { fileIo } from '@kit.CoreFileKit';
 import { FindingCategory, PrivacyFinding, PrivacyScanResult, RiskLevel } from '../models/PrivacyModels';
 import { GifMetadata, GifMetadataSummary } from './GifMetadata';
+import { ContainerMetadata, ContainerMetadataSummary } from './ContainerMetadata';
+import { JpegMetadata, JpegMetadataSummary } from './JpegMetadata';
+import { TiffMetadata, TiffMetadataSummary } from './TiffMetadata';
 
 class MetadataDefinition {
   key: image.PropertyKey;
@@ -96,6 +99,54 @@ export class MetadataScanner {
             findings.push(finding);
           }
           return new PrivacyScanResult(uri, findings);
+        }
+        if (ContainerMetadata.isPng(header) || stat.size >= 12) {
+          const containerBuffer: ArrayBuffer = new ArrayBuffer(stat.size);
+          const containerRead: number = await fileIo.read(sourceFile.fd, containerBuffer);
+          if (containerRead !== stat.size) throw new Error('Unable to read the complete image container.');
+          const containerBytes: Uint8Array = new Uint8Array(containerBuffer);
+          if (JpegMetadata.isJpeg(containerBytes)) {
+            const jpeg: JpegMetadataSummary = JpegMetadata.inspect(containerBytes);
+            if (jpeg.commentCount > 0 || jpeg.iptcCount > 0 || jpeg.privateXmpCount > 0) {
+              const finding = new PrivacyFinding('metadata-JPEG_CONTAINER', 'JPEG_CONTAINER', RiskLevel.HIGH,
+                '包含 JPEG 扩展元数据', '注释、IPTC 或 XMP 可能携带身份、位置、时间和编辑信息。',
+                '建议清除', true,
+                `${jpeg.commentCount} 个注释，${jpeg.iptcCount} 个 IPTC，${jpeg.privateXmpCount} 个隐私 XMP 字段`);
+              finding.category = FindingCategory.METADATA;
+              findings.push(finding);
+            }
+          } else if (ContainerMetadata.isPng(containerBytes)) {
+            const png: ContainerMetadataSummary = ContainerMetadata.inspectPng(containerBytes);
+            if (png.textCount > 0) {
+              const finding = new PrivacyFinding('metadata-PNG_TEXT', 'PNG_TEXT', RiskLevel.MEDIUM,
+                '包含 PNG 文本元数据', '文本块可能包含作者、软件、位置、时间或自由备注。',
+                '建议清除', true, `${png.textCount} 个文本块`);
+              finding.category = FindingCategory.METADATA;
+              findings.push(finding);
+            }
+          } else if (ContainerMetadata.isWebp(containerBytes)) {
+            const webp: ContainerMetadataSummary = ContainerMetadata.inspectWebp(containerBytes);
+            if (webp.exifCount > 0 || webp.xmpCount > 0) {
+              const finding = new PrivacyFinding('metadata-WEBP_CONTAINER', 'WEBP_CONTAINER', RiskLevel.HIGH,
+                '包含 WebP 元数据', 'WebP 容器包含 EXIF 或 XMP，可能携带位置、设备和身份信息。',
+                '建议深度清除', true, `${webp.exifCount} 个 EXIF，${webp.xmpCount} 个 XMP`);
+              finding.category = FindingCategory.METADATA;
+              findings.push(finding);
+            }
+            return new PrivacyScanResult(uri, findings);
+          } else if (TiffMetadata.isClassicTiff(containerBytes)) {
+            const tiff: TiffMetadataSummary = TiffMetadata.inspect(containerBytes);
+            if (tiff.privacyTagCount > 0 || tiff.gpsDirectoryCount > 0 || tiff.xmpIptcCount > 0) {
+              const finding = new PrivacyFinding('metadata-TIFF_CONTAINER', 'TIFF_CONTAINER', RiskLevel.HIGH,
+                '包含 TIFF/DNG 元数据', 'IFD、GPS、XMP 或 IPTC 可能携带位置、设备和身份信息。',
+                '建议清除', true,
+                `${tiff.privacyTagCount} 个隐私标签，${tiff.gpsDirectoryCount} 个 GPS 目录，${tiff.xmpIptcCount} 个 XMP/IPTC`);
+              finding.category = FindingCategory.METADATA;
+              findings.push(finding);
+            }
+            return new PrivacyScanResult(uri, findings);
+          }
+          fileIo.lseek(sourceFile.fd, 0, fileIo.WhenceType.SEEK_SET);
         }
         fileIo.lseek(sourceFile.fd, 0, fileIo.WhenceType.SEEK_SET);
       }

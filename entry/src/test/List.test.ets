@@ -1,5 +1,6 @@
 import { describe, expect, it } from '@ohos/hypium';
 import { GifMetadata, GifMetadataSummary } from '../main/ets/metadata/GifMetadata';
+import { ContainerMetadata, ContainerMetadataSummary } from '../main/ets/metadata/ContainerMetadata';
 
 function bytes(values: number[]): Uint8Array {
   return new Uint8Array(values);
@@ -41,6 +42,31 @@ export default function testsuite(): void {
         rejected = true;
       }
       expect(rejected).assertTrue();
+    });
+  });
+
+  describe('ContainerMetadata', (): void => {
+    it('removes WebP EXIF and XMP while retaining animation chunks', 0, (): void => {
+      const body: number[] = [
+        0x57, 0x45, 0x42, 0x50,
+        0x56, 0x50, 0x38, 0x58, 0x02, 0x00, 0x00, 0x00, 0x02, 0x00,
+        0x45, 0x58, 0x49, 0x46, 0x02, 0x00, 0x00, 0x00, 0x01, 0x02,
+        0x58, 0x4D, 0x50, 0x20, 0x01, 0x00, 0x00, 0x00, 0x78, 0x00,
+        0x41, 0x4E, 0x49, 0x4D, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00
+      ];
+      const input: Uint8Array = new Uint8Array(body.length + 8);
+      input.set(bytes([0x52, 0x49, 0x46, 0x46, body.length, 0, 0, 0]), 0);
+      input.set(bytes(body), 8);
+      const output: Uint8Array = ContainerMetadata.sanitizeWebp(input);
+      const result: ContainerMetadataSummary = ContainerMetadata.inspectWebp(output);
+      expect(result.exifCount).assertEqual(0);
+      expect(result.xmpCount).assertEqual(0);
+      let hasAnimation: boolean = false;
+      for (let index: number = 0; index + 3 < output.length; index++) {
+        if (output[index] === 0x41 && output[index + 1] === 0x4E &&
+          output[index + 2] === 0x49 && output[index + 3] === 0x4D) hasAnimation = true;
+      }
+      expect(hasAnimation).assertTrue();
     });
   });
 }

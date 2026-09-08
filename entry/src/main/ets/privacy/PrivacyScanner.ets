@@ -37,9 +37,12 @@ export class PrivacyScanner {
       const sourceInfo: image.ImageInfo = await source.getImageInfo();
       mimeType = sourceInfo.mimeType;
       try { multiFrame = await source.getFrameCount() > 1; } catch (_) {}
-      const metadataOnlyAnimation: boolean = multiFrame && sourceInfo.mimeType === 'image/gif';
+      const metadataOnlyAnimation: boolean = multiFrame &&
+        (sourceInfo.mimeType === 'image/gif' || sourceInfo.mimeType === 'image/webp' ||
+        sourceInfo.mimeType === 'image/tiff' || sourceInfo.mimeType === 'image/x-adobe-dng' ||
+        sourceInfo.mimeType === 'image/heif' || sourceInfo.mimeType === 'image/heic');
       if (metadataOnlyAnimation) {
-        warnings.push('GIF 动画可无重编码清理元数据；当前版本不对各帧执行人脸、二维码或水印处理');
+        warnings.push('动画图片可无重编码清理元数据；当前版本不对各帧执行人脸、二维码或水印处理');
       } else if (multiFrame) {
         warnings.push('已识别为多帧图片；当前版本只检查首帧，不会生成可能丢失动画的副本');
       }
@@ -103,7 +106,9 @@ export class PrivacyScanner {
     result.pixelWidth = pixelWidth;
     result.pixelHeight = pixelHeight;
     result.mimeType = mimeType;
-    result.readOnlyTool = multiFrame && mimeType !== 'image/gif';
+    result.readOnlyTool = multiFrame && mimeType !== 'image/gif' && mimeType !== 'image/webp';
+    if (mimeType === 'image/tiff' || mimeType === 'image/x-adobe-dng') result.readOnlyTool = false;
+    if (mimeType === 'image/heif' || mimeType === 'image/heic') result.readOnlyTool = false;
     return result;
   }
 
