@@ -2,6 +2,7 @@ export class JpegMetadataSummary {
   commentCount: number = 0;
   iptcCount: number = 0;
   privateXmpCount: number = 0;
+  exifCount: number = 0;
 }
 
 /**
@@ -32,7 +33,8 @@ export class JpegMetadata {
     const summary: JpegMetadataSummary = new JpegMetadataSummary();
     const output: Uint8Array = JpegMetadata.rewrite(bytes, summary, true);
     const verified: JpegMetadataSummary = JpegMetadata.inspect(output);
-    if (verified.commentCount !== 0 || verified.iptcCount !== 0 || verified.privateXmpCount !== 0) {
+    if (verified.commentCount !== 0 || verified.iptcCount !== 0 || verified.privateXmpCount !== 0 ||
+      verified.exifCount !== 0) {
       throw new Error('JPEG container metadata remained after rewriting.');
     }
     return output;
@@ -119,15 +121,17 @@ export class JpegMetadata {
       const iptc: boolean = marker === 0xED;
       const xmp: boolean = marker === 0xE1 &&
         JpegMetadata.startsWithAscii(bytes, payloadStart, 'http://ns.adobe.com/xap/1.0/\u0000');
+      const exif: boolean = marker === 0xE1 && JpegMetadata.startsWithAscii(bytes, payloadStart, 'Exif\u0000\u0000');
       if (comment) summary.commentCount++;
       if (iptc) summary.iptcCount++;
+      if (exif) summary.exifCount++;
       let part: Uint8Array = bytes.subarray(start, end);
       if (xmp) {
         const copy: Uint8Array = new Uint8Array(part);
         summary.privateXmpCount += JpegMetadata.scrubPrivateXmp(copy);
         if (sanitize) part = copy;
       }
-      if (!sanitize || (!comment && !iptc)) {
+      if (!sanitize || (!comment && !iptc && !exif)) {
         parts.push(part);
         outputLength += part.length;
       }

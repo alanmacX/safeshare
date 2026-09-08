@@ -212,7 +212,13 @@ export class MetadataSanitizer {
           jpegProtected = JpegMetadata.protectedMediaBytes(cleaned);
           await this.writeFileBytes(outputPath, cleaned);
         }
-        await this.applyMetadataPolicyInPlace(outputPath, policy, preserved);
+        // JPEG/PNG container rewriting has already removed the source's
+        // privacy metadata. Do not submit `null` values to ImageKit: API 24
+        // rejects them as unsupported property values. Only add explicitly
+        // preserved/replacement values back to these clean containers.
+        const containerAlreadyClean: boolean = sourceInfo.mimeType === 'image/jpeg' ||
+          sourceInfo.mimeType === 'image/png';
+        await this.applyMetadataPolicyInPlace(outputPath, policy, preserved, containerAlreadyClean);
         if (jpegProtected !== undefined) {
           const afterExifWrite: Uint8Array = JpegMetadata.protectedMediaBytes(
             await this.readPathBytes(outputPath));
@@ -388,7 +394,7 @@ export class MetadataSanitizer {
   }
 
   private async applyMetadataPolicyInPlace(path: string, policy: MetadataPolicy,
-    preserved: MetadataValue[]): Promise<void> {
+    preserved: MetadataValue[], containerAlreadyClean: boolean = false): Promise<void> {
     let file: fileIo.File | undefined = undefined;
     let outputSource: image.ImageSource | undefined = undefined;
     try {
@@ -399,13 +405,15 @@ export class MetadataSanitizer {
       // Do not submit unsupported keys as one atomic batch: PNG/WebP/HEIF
       // expose different writable property sets. Only remove properties the
       // decoder actually reported for this concrete file.
-      for (let index: number = 0; index < keys.length; index++) {
-        try {
-          const current: string = await outputSource.getImageProperty(keys[index]);
-          if (current.length > 0 && current !== 'undefined' && current !== 'Unknown') {
-            records[keys[index]] = null;
-          }
-        } catch (_) {}
+      if (!containerAlreadyClean) {
+        for (let index: number = 0; index < keys.length; index++) {
+          try {
+            const current: string = await outputSource.getImageProperty(keys[index]);
+            if (current.length > 0 && current !== 'undefined' && current !== 'Unknown') {
+              records[keys[index]] = null;
+            }
+          } catch (_) {}
+        }
       }
       for (let index: number = 0; index < preserved.length; index++) {
         records[preserved[index].key] = preserved[index].value;

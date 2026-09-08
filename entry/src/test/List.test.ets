@@ -1,6 +1,7 @@
 import { describe, expect, it } from '@ohos/hypium';
 import { GifMetadata, GifMetadataSummary } from '../main/ets/metadata/GifMetadata';
 import { ContainerMetadata, ContainerMetadataSummary } from '../main/ets/metadata/ContainerMetadata';
+import { JpegMetadata, JpegMetadataSummary } from '../main/ets/metadata/JpegMetadata';
 import { MediaCapabilityRegistry, SupportGrade } from '../main/ets/metadata/MediaCapabilityRegistry';
 import { FileKind } from '../main/ets/processors/FileTypeRouter';
 
@@ -69,6 +70,24 @@ export default function testsuite(): void {
           output[index + 2] === 0x49 && output[index + 3] === 0x4D) hasAnimation = true;
       }
       expect(hasAnimation).assertTrue();
+    });
+  });
+
+  describe('JpegMetadata', (): void => {
+    it('removes EXIF while preserving encoded image bytes', 0, (): void => {
+      const exif: number[] = [0xFF, 0xE1, 0x00, 0x0A, 0x45, 0x78, 0x69, 0x66, 0x00, 0x00, 0x01, 0x02];
+      const scan: number[] = [0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3F, 0x00,
+        0x11, 0x22, 0x33, 0xFF, 0xD9];
+      const input: Uint8Array = bytes([0xFF, 0xD8].concat(exif, scan));
+      const protectedBefore: Uint8Array = JpegMetadata.protectedMediaBytes(input);
+      const output: Uint8Array = JpegMetadata.sanitize(input);
+      const protectedAfter: Uint8Array = JpegMetadata.protectedMediaBytes(output);
+      const result: JpegMetadataSummary = JpegMetadata.inspect(output);
+      expect(result.exifCount).assertEqual(0);
+      expect(protectedAfter.length).assertEqual(protectedBefore.length);
+      for (let index: number = 0; index < protectedBefore.length; index++) {
+        expect(protectedAfter[index]).assertEqual(protectedBefore[index]);
+      }
     });
   });
 
