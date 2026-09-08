@@ -4,7 +4,6 @@
     { "name": "entry_desc", "value": "净享主入口" },
     { "name": "privacy_entry_desc", "value": "分享到净享检查图片、文档与音视频" },
     { "name": "privacy_entry_label", "value": "净享 SafeShare" },
-    { "name": "read_moving_photo_reason", "value": "用于读取您主动选择或分享的动态照片封面与视频，以便在本机检查和清理元数据" },
     { "name": "watermark_entry_desc", "value": "分享到净享添加用途水印" },
     { "name": "watermark_entry_label", "value": "净享·用途水印" }
   ]

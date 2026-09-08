@@ -1,4 +1,4 @@
-import { abilityAccessCtrl, common, PermissionRequestResult, Permissions } from '@kit.AbilityKit';
+import { common } from '@kit.AbilityKit';
 import { dataSharePredicates } from '@kit.ArkData';
 import { fileIo, fileUri } from '@kit.CoreFileKit';
 import { photoAccessHelper } from '@kit.MediaLibraryKit';
@@ -106,7 +106,6 @@ export class MovingPhotoPrivacyTool {
   }
 
   private async exportComponents(uri: string): Promise<string[]> {
-    await this.ensureReadPermission();
     const asset: photoAccessHelper.PhotoAsset | undefined = await this.assetForUri(uri);
     if (asset === undefined || Number(asset.get(photoAccessHelper.PhotoKeys.PHOTO_SUBTYPE)) !==
       photoAccessHelper.PhotoSubtype.MOVING_PHOTO) throw new Error('MOVING_PHOTO_ASSET_UNAVAILABLE');
@@ -119,20 +118,6 @@ export class MovingPhotoPrivacyTool {
     } catch (error) {
       await this.removeAll([imagePath, videoPath]);
       throw error as Error;
-    }
-  }
-
-  private async ensureReadPermission(): Promise<void> {
-    const permission: Permissions = 'ohos.permission.READ_IMAGEVIDEO';
-    const manager: abilityAccessCtrl.AtManager = abilityAccessCtrl.createAtManager();
-    const tokenId: number = this.context.applicationInfo.accessTokenId;
-    const current: abilityAccessCtrl.GrantStatus = await manager.checkAccessToken(tokenId, permission);
-    if (current === abilityAccessCtrl.GrantStatus.PERMISSION_GRANTED) return;
-    const result: PermissionRequestResult =
-      await manager.requestPermissionsFromUser(this.context, [permission]);
-    if (result.authResults.length === 0 ||
-      result.authResults[0] !== abilityAccessCtrl.GrantStatus.PERMISSION_GRANTED) {
-      throw new Error('MOVING_PHOTO_PERMISSION_DENIED');
     }
   }
 
