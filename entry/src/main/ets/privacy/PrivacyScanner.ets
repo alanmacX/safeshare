@@ -37,7 +37,12 @@ export class PrivacyScanner {
       const sourceInfo: image.ImageInfo = await source.getImageInfo();
       mimeType = sourceInfo.mimeType;
       try { multiFrame = await source.getFrameCount() > 1; } catch (_) {}
-      if (multiFrame) warnings.push('已识别为多帧图片；当前版本只检查首帧，不会生成可能丢失动画的副本');
+      const metadataOnlyAnimation: boolean = multiFrame && sourceInfo.mimeType === 'image/gif';
+      if (metadataOnlyAnimation) {
+        warnings.push('GIF 动画可无重编码清理元数据；当前版本不对各帧执行人脸、二维码或水印处理');
+      } else if (multiFrame) {
+        warnings.push('已识别为多帧图片；当前版本只检查首帧，不会生成可能丢失动画的副本');
+      }
       pixelWidth = sourceInfo.size.width;
       pixelHeight = sourceInfo.size.height;
       const desired: image.Size = this.detectionSize(sourceInfo.size);
@@ -65,17 +70,19 @@ export class PrivacyScanner {
       const scaleX: number = pixelWidth / detectionInfo.size.width;
       const scaleY: number = pixelHeight / detectionInfo.size.height;
 
-      try {
-        findings.push(...await this.scanQrFromDetectionMap(detectionMap, scaleX, scaleY));
-      } catch (_) {
-        warnings.push('当前设备未完成二维码与条码检查');
-      }
-
-      if (canIUse('SystemCapability.AI.Face.Detector')) {
+      if (!metadataOnlyAnimation) {
         try {
-          findings.push(...await this.faceScanner.scan(detectionMap, scaleX, scaleY));
+          findings.push(...await this.scanQrFromDetectionMap(detectionMap, scaleX, scaleY));
         } catch (_) {
-          warnings.push('人脸检测模型未就绪或本次检查失败');
+          warnings.push('当前设备未完成二维码与条码检查');
+        }
+
+        if (canIUse('SystemCapability.AI.Face.Detector')) {
+          try {
+            findings.push(...await this.faceScanner.scan(detectionMap, scaleX, scaleY));
+          } catch (_) {
+            warnings.push('人脸检测模型未就绪或本次检查失败');
+          }
         }
       }
 
@@ -96,7 +103,7 @@ export class PrivacyScanner {
     result.pixelWidth = pixelWidth;
     result.pixelHeight = pixelHeight;
     result.mimeType = mimeType;
-    result.readOnlyTool = multiFrame;
+    result.readOnlyTool = multiFrame && mimeType !== 'image/gif';
     return result;
   }
 

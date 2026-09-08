@@ -58,6 +58,8 @@
               { "scheme": "content", "utd": "general.heic", "maxFileSupported": 50 },
               { "scheme": "file", "utd": "com.google.webp", "maxFileSupported": 50 },
               { "scheme": "content", "utd": "com.google.webp", "maxFileSupported": 50 },
+              { "scheme": "file", "utd": "general.gif", "maxFileSupported": 50 },
+              { "scheme": "content", "utd": "general.gif", "maxFileSupported": 50 },
               { "scheme": "file", "utd": "com.adobe.pdf", "maxFileSupported": 20 },
               { "scheme": "content", "utd": "com.adobe.pdf", "maxFileSupported": 20 },
               { "scheme": "file", "utd": "org.openxmlformats.wordprocessingml.document", "maxFileSupported": 20 },

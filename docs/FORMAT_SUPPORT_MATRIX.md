@@ -17,17 +17,31 @@ SafeShare 已完整支持。只有同时通过识别、扫描、生成副本、�
 
 | 类型 | 目标状态 | 元数据副本策略 | 当前结论 |
 |---|---|---|---|
-| JPEG/JPG | 完整支持 | 原格式复制后定点删除/替换 EXIF；仅视觉编辑时重编码 | 待实现无重编码路径与保留项复检 |
-| PNG | 完整支持 | 原格式复制后处理可写属性；不得因清元数据改变像素 | 待实现并验证 PNG chunks/透明度 |
-| HEIF/HEIC（SDR） | 完整支持 | 原容器处理属性，保留主图 | 待实现并真机验证 |
-| HEIF/HEIC（HDR/辅助图） | 完整支持 | 必须保留 HDR、gain map、辅助图、色彩信息 | 当前普通 PixelMap 路径不合格 |
+| JPEG/JPG | 完整支持 | 原格式复制后定点删除/替换 EXIF；仅视觉编辑时重编码 | 已实现元数据无重编码路径和读回复检；待真机样本验收 |
+| PNG | 完整支持 | 原格式复制后处理可写属性；不得因清元数据改变像素 | 已实现属性原位处理；待验证私有 chunk、透明度和真机回读 |
+| HEIF/HEIC（SDR） | 完整支持 | 原容器处理属性，保留主图 | 已实现属性原位处理；待真机验证 |
+| HEIF/HEIC（HDR/辅助图） | 完整支持 | 必须保留 HDR、gain map、辅助图、色彩信息 | 仅元数据路径保持原容器；视觉编辑会扁平化，尚未开放为完整支持 |
 | 动态照片 | 完整支持元数据；暂不支持视觉编辑 | 分离静态图与视频，分别无重编码清理元数据，再组合为 MovingPhoto | 待实现；隐藏水印、人脸、二维码操作 |
 | 相册普通视频（MP4/MOV） | 完整支持元数据 | demux/remux，复制编码轨道；保留方向、时序与音轨 | 已有基础实现，待补容器/轨道门禁和真机矩阵 |
-| 相册中的 GIF/HEIFS 序列 | 不得降级 | 必须保留全部帧、帧时序和循环信息 | 当前会静态化，完成前阻止生成副本 |
+| 相册中的 GIF | 元数据完整支持 | 容器级移除 Comment 和非动画 Application 扩展；帧、时序、调色板、循环块逐字节保留 | 已实现并复解析；人脸/二维码/水印不开放，待真机相册回读 |
+| HEIFS 序列 | 不得降级 | 必须保留全部帧、帧时序和辅助信息 | 当前阻止生成副本 |
 
 “系统相册完全可用”以实际资产子类型和内容能力为准：静态图、HDR 图、动态照片、
 普通视频必须分别识别。任何无法保持媒体形态的资产都必须在处理前阻止，不能自动
 转成 JPEG 或静态图。
+
+华为并未发布一张“手机图库可保存的全部扩展名”静态清单。API 24 可依赖的官方边界是：
+
+- Media Library 把图库资产分为图片/视频，并把图片子类型分为 `DEFAULT`、
+  `MOVING_PHOTO`、`BURST`；API 21 起还会报告 SDR/HDR 动态范围。
+- 预置 UTD 明确包含 JPEG、PNG、TIFF、GIF、HEIF、HEIC、WebP 和 Moving Photo，
+  但“有 UTD”不等于每台设备的图库都能完整解码或编辑。
+- API 24 ImageSource 声明可读 JPEG、PNG、GIF、BMP、WebP、DNG、HEIC、WBMP、
+  HEIFS、TIFF、SVG、ICO；部分格式依赖硬件，仍须在真机调用
+  `getImageSourceSupportedFormats` 做运行时门禁。
+- 因而接收策略不能只看后缀：以 PhotoAsset 的 MIME/子类型/动态范围，加文件签名和
+  运行时解码能力共同判定。DNG、TIFF、HEIFS 等“能解码但不能保证隐私元数据完整
+  清理”的类型继续只读或拒绝输出。
 
 ## 文件应用中的常用图片
 
@@ -42,6 +56,31 @@ SafeShare 已完整支持。只有同时通过识别、扫描、生成副本、�
 
 API 24 没有 API 26 的通用 XMP 读写能力。即便 EXIF 属性复检通过，也不能使用
 “所有元数据已清除”描述包含未知 XMP/IPTC/厂商私有块的输入。
+
+## 子功能支持矩阵
+
+“✓”表示代码路径已实现且有输出复检；“△”表示能力有限或仍需真机/对应应用验收；
+“—”表示产品应隐藏或阻止该操作，而不是把文件转换成别的格式。
+
+| 类型 | 元数据检查/清理 | 文字水印 | 图片水印 | 人脸/二维码 | 媒体形态保持 |
+|---|---|---|---|---|---|
+| JPEG/JPG | ✓（EXIF 管理字段） | ✓ 重编码 | ✓ 重编码 | △ 端侧能力，需真机 | 视觉编辑后像素保持、压缩非无损 |
+| PNG | ✓（API 可见属性） | ✓ 重编码 | ✓ 重编码 | △ 端侧能力，需真机 | 需验证透明度/私有 chunk |
+| HEIF/HEIC SDR | ✓（API 可见属性） | △ 重编码 | △ 重编码 | △ 端侧能力，需真机 | 视觉编辑可能改变编码参数 |
+| HEIF/HEIC HDR/辅助图 | ✓ 原容器 | — | — | — | 仅元数据操作保持 HDR/辅助图 |
+| WebP 静态图 | △ API 可见属性 | △ 重编码 | △ 重编码 | △ 端侧能力，需真机 | 待验证 ICC/XMP 与有损/无损模式 |
+| GIF 动画 | ✓ 容器级 | — | — | — | ✓ 不解码、不重编码、保留动画 |
+| HEIFS/其他多帧图 | — | — | — | — | 当前只读阻止 |
+| 动态照片 | 规划中 | — | — | — | 尚未实现拆分/重组 |
+| MP4/M4A | △ 容器检查及码流复制 | — | — | — | 已有 demux/remux，待真机矩阵 |
+| PDF | △ 属性/深度清理需区分 | △ 页面重建，非无损 | △ 页面重建，非无损 | — | 表单/签名/附件等可能受损 |
+| Word/PPT OOXML | ✓ 文档属性层 | — | — | — | ZIP 部件保持；不宣称检查内嵌媒体 |
+| Excel OOXML | ✓ 文档属性层 | — | — | — | 公式/宏包保持；不宣称检查内嵌图片人脸/二维码 |
+
+表格的“支持”目前严格限定为工作簿文档属性清理。单元格内容、隐藏工作表、批注、
+外部链接、嵌入对象、内嵌图片元数据、人脸/二维码，以及打印水印都是不同能力，尚未
+逐项实现前不得显示为已检查或已清理。Excel 本身没有等同图片像素水印的统一、无损
+文件级水印语义；未来若增加页眉/背景/形状水印，必须分别验证打印、编辑和宏兼容性。
 
 ## Office 文档
 
@@ -82,7 +121,8 @@ Office 的“完整支持”当前只指文档属性层。批注、修订、隐�
 
 - [ ] 结果页、批量列表和分享确认页显示每个文件的精确类型、容器、处理等级与转换风险。
 - [ ] 相册资产识别增加静态图/HDR/动态照片/序列图/普通视频子类型。
-- [ ] 建立“仅元数据”无重编码路径；视觉编辑与元数据处理路径分离。
+- [x] JPEG/PNG/HEIF/WebP 建立“仅元数据”无重编码路径；视觉编辑与元数据处理路径分离。
+- [x] GIF 容器元数据清理保留动画帧、时序和循环控制。
 - [ ] 动态照片分别处理图片和视频元数据并重新组合；禁用其水印、人脸和二维码入口。
 - [ ] 对每个输出同时复检删除项、替换项、保留项、真实格式和可回读性。
 - [ ] OOXML 保持输入扩展名、Content-Type、MIME、UTD 与宏/模板/放映语义。
@@ -90,3 +130,11 @@ Office 的“完整支持”当前只指文档属性层。批注、修订、隐�
 - [ ] 音频按 M4A、MP3、FLAC、WAV、Ogg、AAC、AMR 分容器实现和验收。
 - [ ] 收紧分享入口 UTD；移除未经支持矩阵覆盖的泛 `general.file/general.object` 承诺。
 - [ ] 建立华为相册、文件应用、系统分享入口三套真机样本矩阵并保存匿名化验收结果。
+
+## 官方依据（API 24）
+
+- [ImageSource 支持格式与运行时能力查询](https://developer.huawei.com/consumer/cn/doc/doccenter-capabilities/api/arkts-apis-image-f)
+- [PhotoPickerComponent 的图片子类型、HDR/SDR 与 MIME 信息](https://developer.huawei.com/consumer/cn/doc/doccenter-capabilities/api/ohos-file-photopickercomponent)
+- [动态照片访问、拆分与保存](https://developer.huawei.com/consumer/cn/doc/harmonyos-guides-V13/photoaccesshelper-movingphoto-V13)
+- [Picture 对 JPEG/HEIF HDR、增益图和辅助图的保留语义](https://developer.huawei.com/consumer/cn/doc/doccenter-capabilities/image-picture-decoding)
+- [预置 UTD 清单](https://developer.huawei.com/consumer/cn/doc/harmonyos-guides-V13/uniform-data-type-list-V13)

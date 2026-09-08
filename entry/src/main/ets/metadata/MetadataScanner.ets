@@ -1,6 +1,7 @@
 import { image } from '@kit.ImageKit';
 import { fileIo } from '@kit.CoreFileKit';
 import { FindingCategory, PrivacyFinding, PrivacyScanResult, RiskLevel } from '../models/PrivacyModels';
+import { GifMetadata, GifMetadataSummary } from './GifMetadata';
 
 class MetadataDefinition {
   key: image.PropertyKey;
@@ -69,6 +70,35 @@ export class MetadataScanner {
     const findings: PrivacyFinding[] = [];
     try {
       sourceFile = await fileIo.open(uri, fileIo.OpenMode.READ_ONLY);
+      const stat: fileIo.Stat = fileIo.statSync(sourceFile.fd);
+      if (stat.size >= 6) {
+        const headerBuffer: ArrayBuffer = new ArrayBuffer(6);
+        const headerRead: number = fileIo.readSync(sourceFile.fd, headerBuffer, { length: 6 });
+        const header: Uint8Array = new Uint8Array(headerBuffer, 0, Math.max(0, headerRead));
+        fileIo.lseek(sourceFile.fd, 0, fileIo.WhenceType.SEEK_SET);
+        if (GifMetadata.isGif(header)) {
+          const buffer: ArrayBuffer = new ArrayBuffer(stat.size);
+          const read: number = await fileIo.read(sourceFile.fd, buffer);
+          if (read !== stat.size) throw new Error('Unable to read the complete GIF.');
+          const summary: GifMetadataSummary = GifMetadata.inspect(new Uint8Array(buffer));
+          if (summary.commentCount > 0) {
+            const finding = new PrivacyFinding('metadata-GIF_COMMENT', 'GIF_COMMENT', RiskLevel.MEDIUM,
+              '包含 GIF 注释', 'GIF 注释可能包含姓名、地点或生成工具信息。', '建议清除', true,
+              `${summary.commentCount} 个注释块`);
+            finding.category = FindingCategory.METADATA;
+            findings.push(finding);
+          }
+          if (summary.applicationMetadataCount > 0) {
+            const finding = new PrivacyFinding('metadata-GIF_APPLICATION', 'GIF_APPLICATION', RiskLevel.MEDIUM,
+              '包含 GIF 应用元数据', '应用扩展可能包含 XMP、色彩配置或厂商私有信息。', '建议清除', true,
+              `${summary.applicationMetadataCount} 个应用扩展`);
+            finding.category = FindingCategory.METADATA;
+            findings.push(finding);
+          }
+          return new PrivacyScanResult(uri, findings);
+        }
+        fileIo.lseek(sourceFile.fd, 0, fileIo.WhenceType.SEEK_SET);
+      }
       source = image.createImageSource(sourceFile.fd);
       try {
         const latitude: string = await source.getImageProperty(image.PropertyKey.GPS_LATITUDE);

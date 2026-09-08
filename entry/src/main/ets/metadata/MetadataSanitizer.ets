@@ -8,6 +8,7 @@ import { MetadataScanner } from './MetadataScanner';
 import { TempFileManager } from '../storage/TempFileManager';
 import { MetadataMode, MetadataPolicy } from './MetadataPolicy';
 import { PurposeWatermark } from '../privacy/PurposeWatermark';
+import { GifMetadata, GifMetadataSummary } from './GifMetadata';
 
 import { runRedaction } from '../privacy/RedactionTask';
 import { hilog } from '@kit.PerformanceAnalysisKit';
@@ -51,8 +52,39 @@ export class MetadataSanitizer {
       flowLog('img_open_source');
       source = image.createImageSource(sourceFile.fd);
       const sourceInfo: image.ImageInfo = await source.getImageInfo();
+      const hasVisualEdit: boolean = actions.length > 0 || policy.purposeWatermark.trim().length > 0 ||
+        policy.imageWatermarkUri.length > 0;
       let frameCount: number = 1;
       try { frameCount = await source.getFrameCount(); } catch (_) {}
+      if (sourceInfo.mimeType === 'image/gif') {
+        if (hasVisualEdit) throw new Error('GIF_VISUAL_EDIT_UNSUPPORTED');
+        let sourceName: string = uri;
+        try { sourceName = sourceFile.name; } catch (_) {}
+        outputPath = manager.createOutputPath(sourceName, 'gif');
+        const stat: fileIo.Stat = fileIo.statSync(sourceFile.fd);
+        fileIo.lseek(sourceFile.fd, 0, fileIo.WhenceType.SEEK_SET);
+        const inputBuffer: ArrayBuffer = new ArrayBuffer(stat.size);
+        const inputRead: number = await fileIo.read(sourceFile.fd, inputBuffer);
+        if (inputRead !== stat.size) throw new Error('Unable to read the complete GIF.');
+        const cleaned: Uint8Array = GifMetadata.sanitize(new Uint8Array(inputBuffer));
+        output = await fileIo.open(outputPath,
+          fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
+        await fileIo.write(output.fd, cleaned.buffer);
+        fileIo.closeSync(output);
+        output = undefined;
+        const gifVerification: GifMetadataSummary = GifMetadata.inspect(cleaned);
+        if (gifVerification.commentCount !== 0 || gifVerification.applicationMetadataCount !== 0) {
+          throw new Error('GIF metadata verification failed.');
+        }
+        const outputUri: string = fileUri.getUriFromPath(outputPath);
+        const verification = await this.scanner.scan(outputUri);
+        const sanitized = new SanitizedFile(outputPath, outputUri, verification, 'general.gif', 'image/gif');
+        sanitized.pixelWidth = sourceInfo.size.width;
+        sanitized.pixelHeight = sourceInfo.size.height;
+        sanitized.byteSize = cleaned.length;
+        flowLog('gif_metadata_copy_done', `frames=${frameCount}`);
+        return sanitized;
+      }
       if (frameCount > 1) throw new Error('MULTI_FRAME_IMAGE');
       flowLog('img_source_info');
       await this.collectPreservedMetadata(source, policy, preserved);
@@ -63,8 +95,6 @@ export class MetadataSanitizer {
       let sourceName: string = uri;
       try { sourceName = sourceFile.name; } catch (_) {}
       outputPath = manager.createOutputPath(sourceName, this.extensionForMimeType(outputMimeType));
-      const hasVisualEdit: boolean = actions.length > 0 || policy.purposeWatermark.trim().length > 0 ||
-        policy.imageWatermarkUri.length > 0;
       // Metadata-only cleaning must not decode and re-encode the image. Besides
       // avoiding generational JPEG/HEIF loss, an exact container copy keeps
       // HDR gain maps and other auxiliary images owned by the system camera.
