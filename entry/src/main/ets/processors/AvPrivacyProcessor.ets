@@ -160,7 +160,7 @@ export class AvPrivacyTool {
    * metadata is deliberately not passed to AVMuxer. The source stays read-only
    * and the generated sandbox file is scanned again before it is returned.
    */
-  async sanitize(uri: string): Promise<SanitizedFile> {
+  async sanitize(uri: string, forMovingPhoto: boolean = false): Promise<SanitizedFile> {
     let outputPath: string = '';
     let input: fileIo.File | undefined = undefined;
     let output: fileIo.File | undefined = undefined;
@@ -186,8 +186,9 @@ export class AvPrivacyTool {
       fileIo.closeSync(input);
       input = undefined;
       const outputUri: string = fileUri.getUriFromPath(outputPath);
-      const verification: PrivacyScanResult = await this.scan(outputUri);
-      if (verification.findings.length > 0) {
+      const verification: PrivacyScanResult = forMovingPhoto ?
+        await this.verifyMovingPhotoVideo(outputUri) : await this.scan(outputUri);
+      if (verification.scanFailed || verification.findings.length > 0) {
         throw new Error('METADATA_REMAINS');
       }
       const sanitized = new SanitizedFile(outputPath, outputUri, verification,
@@ -210,77 +211,31 @@ export class AvPrivacyTool {
   }
 
   /**
-   * Preserves every MovingPhoto video track and encoded byte. Only bounded,
-   * privacy-bearing moov values are overwritten in an app-sandbox copy.
+   * A newly muxed MovingPhoto MP4 contains only copied encoded media tracks.
+   * Verify its container directly; AVMetadataExtractor may synthesize aliases
+   * which were never copied from the source and are not stored metadata.
    */
-  async sanitizeMovingPhotoComponent(uri: string): Promise<SanitizedFile> {
-    let outputPath: string = '';
-    let source: fileIo.File | undefined = undefined;
-    let target: fileIo.File | undefined = undefined;
-    try {
-      source = await fileIo.open(uri, fileIo.OpenMode.READ_ONLY);
-      const size: number = fileIo.statSync(source.fd).size;
-      if (size <= 0) throw new Error('EMPTY_MEDIA');
-      outputPath = this.tempFiles.createOutputPath('moving-photo-video.mp4', 'mp4');
-      target = await fileIo.open(outputPath,
-        fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
-      await fileIo.copyFile(source.fd, target.fd);
-      if (!IsoBmffMetadataReader.sanitizePrivacyMetadata(target.fd, size)) {
-        throw new Error('MOVING_PHOTO_CONTAINER_UNSUPPORTED');
-      }
-      fileIo.closeSync(target);
-      target = undefined;
-      fileIo.closeSync(source);
-      source = undefined;
-      const outputUri: string = fileUri.getUriFromPath(outputPath);
-      // MovingPhoto uses a deterministic container-only contract. The same
-      // ISO-BMFF parser classifies, sanitizes and verifies metadata, so
-      // platform AVMetadataExtractor aliases cannot create false findings or
-      // tempt cleanup code to remove functional motion anchors.
-      const verification: PrivacyScanResult = await this.scanMovingPhotoComponent(outputUri);
-      if (verification.scanFailed || verification.findings.length > 0) {
-        throw new Error('MOVING_PHOTO_METADATA_REMAINS');
-      }
-      const sanitized = new SanitizedFile(outputPath, outputUri, verification,
-        'general.mpeg-4', 'video/mp4');
-      sanitized.fileKind = 'AUDIO_VIDEO';
-      sanitized.byteSize = fileIo.statSync(outputPath).size;
-      return sanitized;
-    } catch (error) {
-      if (outputPath.length > 0) await this.tempFiles.remove(outputPath);
-      throw error as Error;
-    } finally {
-      try { if (target !== undefined) fileIo.closeSync(target); } catch (_) {}
-      try { if (source !== undefined) fileIo.closeSync(source); } catch (_) {}
-    }
-  }
-
-  async scanMovingPhotoComponent(uri: string): Promise<PrivacyScanResult> {
+  private async verifyMovingPhotoVideo(uri: string): Promise<PrivacyScanResult> {
     let source: fileIo.File | undefined = undefined;
     const findings: PrivacyFinding[] = [];
-    const warnings: string[] = [];
-    let mimeType: string = 'video/mp4';
     try {
       source = await fileIo.open(uri, fileIo.OpenMode.READ_ONLY);
       const size: number = fileIo.statSync(source.fd).size;
       if (size <= 0 || !IsoBmffMetadataReader.isReadableContainer(source.fd, size)) {
-        const failed: PrivacyScanResult = this.result(uri, findings,
-          ['动态照片的视频容器无法验证'], true, false);
+        const failed: PrivacyScanResult = this.result(uri, findings, [], true, false);
         failed.scanFailed = true;
         return failed;
       }
-      mimeType = IsoBmffMetadataReader.containerMimeType(source.fd, size);
       this.collectIsoMetadata(findings, IsoBmffMetadataReader.read(source.fd, size));
     } catch (_) {
-      const failed: PrivacyScanResult = this.result(uri, findings,
-        ['动态照片的视频容器无法验证'], true, false);
+      const failed: PrivacyScanResult = this.result(uri, findings, [], true, false);
       failed.scanFailed = true;
       return failed;
     } finally {
       try { if (source !== undefined) fileIo.closeSync(source); } catch (_) {}
     }
-    const result: PrivacyScanResult = this.result(uri, findings, warnings, true, false);
-    result.mimeType = mimeType.length > 0 ? mimeType : 'video/mp4';
+    const result: PrivacyScanResult = this.result(uri, findings, [], true, false);
+    result.mimeType = 'video/mp4';
     return result;
   }
 

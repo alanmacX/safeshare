@@ -39,8 +39,7 @@ export class MovingPhotoPrivacyTool {
     const exported: string[] = await this.exportComponents(uri);
     try {
       const imageResult: PrivacyScanResult = await this.imageScanner.scan(fileUri.getUriFromPath(exported[0]));
-      const videoResult: PrivacyScanResult =
-        await this.videoTool.scanMovingPhotoComponent(fileUri.getUriFromPath(exported[1]));
+      const videoResult: PrivacyScanResult = await this.videoTool.scan(fileUri.getUriFromPath(exported[1]));
       const findings: PrivacyFinding[] = [];
       this.appendFindings(findings, imageResult.findings, 'moving-image-');
       this.appendFindings(findings, videoResult.findings, 'moving-video-');
@@ -66,11 +65,11 @@ export class MovingPhotoPrivacyTool {
     let videoFile: SanitizedFile | undefined = undefined;
     try {
       imageFile = await this.imageSanitizer.sanitize(fileUri.getUriFromPath(exported[0]), [], policy);
-      // A MovingPhoto video may carry the still-image-time/anchor track.
-      // The generic remuxer intentionally drops metadata tracks, so the
-      // dedicated in-place method preserves every track and edits only
-      // privacy-bearing moov values.
-      videoFile = await this.videoTool.sanitizeMovingPhotoComponent(fileUri.getUriFromPath(exported[1]));
+      // loadMovingPhoto creates the local association from these two sandbox
+      // resources. Copy only encoded audio/video tracks into a fresh MP4:
+      // this preserves playback without carrying source container metadata
+      // or depending on vendor-private metadata tracks.
+      videoFile = await this.videoTool.sanitize(fileUri.getUriFromPath(exported[1]), true);
       const localMovingPhoto: photoAccessHelper.MovingPhoto =
         await photoAccessHelper.MediaAssetManager.loadMovingPhoto(this.context, imageFile.uri, videoFile.uri);
       const verification: PrivacyScanResult = new PrivacyScanResult('', []);
