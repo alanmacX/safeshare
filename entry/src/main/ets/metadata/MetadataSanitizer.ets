@@ -51,6 +51,9 @@ export class MetadataSanitizer {
       flowLog('img_open_source');
       source = image.createImageSource(sourceFile.fd);
       const sourceInfo: image.ImageInfo = await source.getImageInfo();
+      let frameCount: number = 1;
+      try { frameCount = await source.getFrameCount(); } catch (_) {}
+      if (frameCount > 1) throw new Error('MULTI_FRAME_IMAGE');
       flowLog('img_source_info');
       await this.collectPreservedMetadata(source, policy, preserved);
       flowLog('img_collect_props');
@@ -492,7 +495,12 @@ export class MetadataSanitizer {
     if (sourceMimeType === 'image/webp' && supportedFormats.indexOf('image/webp') >= 0) {
       return 'image/webp';
     }
-    return 'image/jpeg';
+    if (sourceMimeType === 'image/jpeg' && supportedFormats.indexOf('image/jpeg') >= 0) {
+      return 'image/jpeg';
+    }
+    // Never silently turn GIF/BMP/TIFF/DNG or an unknown provider format into
+    // JPEG. The caller must show the unsupported-format state instead.
+    throw new Error('UNSUPPORTED_IMAGE_OUTPUT');
   }
 
   private extensionForMimeType(mimeType: string): string {
@@ -515,7 +523,7 @@ export class MetadataSanitizer {
     if (mimeType === 'image/jpeg') return 'general.jpeg';
     if (mimeType === 'image/heif') return 'general.heif';
     if (mimeType === 'image/heic') return 'general.heic';
-    if (mimeType === 'image/webp') return 'org.webmproject.webp';
+    if (mimeType === 'image/webp') return 'com.google.webp';
     return 'general.image';
   }
 

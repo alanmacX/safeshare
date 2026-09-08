@@ -35,9 +35,17 @@ const EXCEL_UTD: string = 'org.openxmlformats.spreadsheetml.sheet';
 const POWERPOINT_UTD: string = 'org.openxmlformats.presentationml.presentation';
 // Preset system UTDs for the OOXML template variants (verified against the
 // published HarmonyOS Uniform Data Type list).
-const WORD_UTDS: string[] = [WORD_UTD, 'org.openxmlformats.wordprocessingml.template'];
-const EXCEL_UTDS: string[] = [EXCEL_UTD, 'org.openxmlformats.spreadsheetml.template'];
-const POWERPOINT_UTDS: string[] = [POWERPOINT_UTD, 'org.openxmlformats.presentationml.template'];
+const WORD_UTDS: string[] = [WORD_UTD, 'org.openxmlformats.wordprocessingml.template',
+  'org.openxmlformats.wordprocessingml.document.macroenabled',
+  'org.openxmlformats.wordprocessingml.template.macroenabled'];
+const EXCEL_UTDS: string[] = [EXCEL_UTD, 'org.openxmlformats.spreadsheetml.template',
+  'org.openxmlformats.spreadsheetml.sheet.macroenabled',
+  'org.openxmlformats.spreadsheetml.template.macroenabled'];
+const POWERPOINT_UTDS: string[] = [POWERPOINT_UTD, 'org.openxmlformats.presentationml.template',
+  'org.openxmlformats.presentationml.presentation.macroenabled',
+  'org.openxmlformats.presentationml.slideshow',
+  'org.openxmlformats.presentationml.slideshow.macroenabled',
+  'org.openxmlformats.presentationml.template.macroenabled'];
 // Legacy binary Office UTDs are matched for recognition only; the scan then
 // degrades honestly because their containers are not OOXML ZIP packages.
 const LEGACY_WORD_UTDS: string[] = ['com.microsoft.word.doc', 'com.microsoft.word.dot'];

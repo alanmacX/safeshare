@@ -25,6 +25,8 @@ export class PrivacyScanner {
     const warnings: string[] = [];
     let pixelWidth: number = 0;
     let pixelHeight: number = 0;
+    let mimeType: string = '';
+    let multiFrame: boolean = false;
 
     let sourceFile: fileIo.File | undefined = undefined;
     let source: image.ImageSource | undefined = undefined;
@@ -33,6 +35,9 @@ export class PrivacyScanner {
       sourceFile = await fileIo.open(uri, fileIo.OpenMode.READ_ONLY);
       source = image.createImageSource(sourceFile.fd);
       const sourceInfo: image.ImageInfo = await source.getImageInfo();
+      mimeType = sourceInfo.mimeType;
+      try { multiFrame = await source.getFrameCount() > 1; } catch (_) {}
+      if (multiFrame) warnings.push('已识别为多帧图片；当前版本只检查首帧，不会生成可能丢失动画的副本');
       pixelWidth = sourceInfo.size.width;
       pixelHeight = sourceInfo.size.height;
       const desired: image.Size = this.detectionSize(sourceInfo.size);
@@ -90,6 +95,8 @@ export class PrivacyScanner {
     result.capabilityWarnings = warnings;
     result.pixelWidth = pixelWidth;
     result.pixelHeight = pixelHeight;
+    result.mimeType = mimeType;
+    result.readOnlyTool = multiFrame;
     return result;
   }
 
