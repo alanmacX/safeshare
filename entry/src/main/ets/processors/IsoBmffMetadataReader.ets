@@ -48,6 +48,27 @@ export class IsoBmffMetadataReader {
     return items;
   }
 
+  /**
+   * Clears privacy-bearing values inside moov without changing a box size,
+   * track, sample, codec payload or MovingPhoto anchor. The caller must pass
+   * a sandbox copy opened read/write; the selected source is never modified.
+   */
+  static sanitizePrivacyMetadata(fd: number, fileSize: number): boolean {
+    const moov: IsoBox | undefined = IsoBmffMetadataReader.findTopLevelMoov(fd, fileSize);
+    if (moov === undefined || moov.size <= moov.headerSize ||
+      moov.size > IsoBmffMetadataReader.MAX_MOOV_BYTES) return false;
+    const payloadSize: number = moov.size - moov.headerSize;
+    const bytes: Uint8Array = IsoBmffMetadataReader.readAt(fd, moov.start + moov.headerSize, payloadSize);
+    if (bytes.length !== payloadSize) return false;
+    IsoBmffMetadataReader.scrubChildren(bytes, 0, bytes.length);
+    try {
+      fileIo.lseek(fd, moov.start + moov.headerSize, fileIo.WhenceType.SEEK_SET);
+      return fileIo.writeSync(fd, bytes.buffer, { length: bytes.byteLength }) === bytes.byteLength;
+    } catch (_) {
+      return false;
+    }
+  }
+
   /** True when the ISO-BMFF top-level structure contains a bounded moov. */
   static isReadableContainer(fd: number, fileSize: number): boolean {
     const moov: IsoBox | undefined = IsoBmffMetadataReader.findTopLevelMoov(fd, fileSize);
@@ -148,6 +169,102 @@ export class IsoBmffMetadataReader {
       }
       cursor += box.size;
     }
+  }
+
+  private static scrubChildren(bytes: Uint8Array, start: number, end: number): void {
+    let cursor: number = start;
+    while (cursor + 8 <= end) {
+      const box: IsoBox | undefined = IsoBmffMetadataReader.boxAt(bytes, cursor, end, 0, end);
+      if (box === undefined) return;
+      const payloadStart: number = cursor + box.headerSize;
+      const payloadEnd: number = cursor + box.size;
+      if (box.type === 'mvhd' || box.type === 'tkhd' || box.type === 'mdhd') {
+        IsoBmffMetadataReader.zeroCreationAndModification(bytes, payloadStart, payloadEnd);
+      } else if (box.type === 'meta') {
+        IsoBmffMetadataReader.scrubMeta(bytes, payloadStart, payloadEnd);
+      } else if (box.type === 'udta' || box.type === 'moov' || box.type === 'trak' ||
+        box.type === 'mdia') {
+        IsoBmffMetadataReader.scrubChildren(bytes, payloadStart, payloadEnd);
+      } else if (IsoBmffMetadataReader.isPrivateDirectAtom(box.type)) {
+        IsoBmffMetadataReader.zeroRange(bytes, payloadStart, payloadEnd);
+      }
+      cursor += box.size;
+    }
+  }
+
+  private static scrubMeta(bytes: Uint8Array, start: number, end: number): void {
+    const childStart: number = IsoBmffMetadataReader.hasValidBoxAt(bytes, start, end) ? start : start + 4;
+    const keys: string[] = [];
+    let ilstStart: number = -1;
+    let ilstEnd: number = -1;
+    let cursor: number = childStart;
+    while (cursor + 8 <= end) {
+      const box: IsoBox | undefined = IsoBmffMetadataReader.boxAt(bytes, cursor, end, 0, end);
+      if (box === undefined) return;
+      const payloadStart: number = cursor + box.headerSize;
+      const payloadEnd: number = cursor + box.size;
+      if (box.type === 'keys') IsoBmffMetadataReader.readKeys(bytes, payloadStart, payloadEnd, keys);
+      if (box.type === 'ilst') {
+        ilstStart = payloadStart;
+        ilstEnd = payloadEnd;
+      }
+      cursor += box.size;
+    }
+    if (ilstStart >= 0) IsoBmffMetadataReader.scrubItemList(bytes, ilstStart, ilstEnd, keys);
+  }
+
+  private static scrubItemList(bytes: Uint8Array, start: number, end: number, keys: string[]): void {
+    let cursor: number = start;
+    while (cursor + 8 <= end) {
+      const item: IsoBox | undefined = IsoBmffMetadataReader.boxAt(bytes, cursor, end, 0, end);
+      if (item === undefined) return;
+      const keyIndex: number = IsoBmffMetadataReader.uint32(bytes, cursor + 4);
+      let key: string = keyIndex > 0 && keyIndex <= keys.length ? keys[keyIndex - 1] : item.type;
+      let childCursor: number = cursor + item.headerSize;
+      const itemEnd: number = cursor + item.size;
+      while (childCursor + 8 <= itemEnd) {
+        const child: IsoBox | undefined = IsoBmffMetadataReader.boxAt(bytes, childCursor, itemEnd, 0, itemEnd);
+        if (child === undefined) break;
+        const childStart: number = childCursor + child.headerSize;
+        const childEnd: number = childCursor + child.size;
+        if (child.type === 'name') {
+          key = IsoBmffMetadataReader.cleanText(bytes, Math.min(childStart + 4, childEnd), childEnd);
+        } else if (child.type === 'data' && IsoBmffMetadataReader.isPrivacyKey(key)) {
+          // Keep the data type/locale prefix and box geometry intact.
+          IsoBmffMetadataReader.zeroRange(bytes, Math.min(childStart + 8, childEnd), childEnd);
+        }
+        childCursor += child.size;
+      }
+      cursor += item.size;
+    }
+  }
+
+  private static zeroCreationAndModification(bytes: Uint8Array, start: number, end: number): void {
+    if (start + 12 > end) return;
+    const fieldBytes: number = bytes[start] === 1 ? 8 : 4;
+    IsoBmffMetadataReader.zeroRange(bytes, start + 4, Math.min(start + 4 + fieldBytes * 2, end));
+  }
+
+  private static isPrivateDirectAtom(type: string): boolean {
+    return ['\u00a9xyz', '\u00a9day', '\u00a9mak', '\u00a9mod', '\u00a9swr', '\u00a9ART',
+      '\u00a9nam', '\u00a9cmt'].indexOf(type) >= 0;
+  }
+
+  private static isPrivacyKey(key: string): boolean {
+    const normalized: string = key.toLowerCase();
+    const needles: string[] = ['location', 'latitude', 'longitude', 'gps', 'iso6709', 'creation',
+      'created', 'datetime', 'date', 'author', 'artist', 'owner', 'copyright', 'manufacturer',
+      'make', 'model', 'device', 'vendor', 'comment', 'description', 'title', 'software',
+      'encoder', 'encoding_tool', '\u00a9xyz', '\u00a9day', '\u00a9mak', '\u00a9mod', '\u00a9swr',
+      '\u00a9art', '\u00a9nam', '\u00a9cmt'];
+    for (let index: number = 0; index < needles.length; index++) {
+      if (normalized.indexOf(needles[index]) >= 0) return true;
+    }
+    return false;
+  }
+
+  private static zeroRange(bytes: Uint8Array, start: number, end: number): void {
+    for (let index: number = Math.max(0, start); index < Math.min(end, bytes.length); index++) bytes[index] = 0;
   }
 
   private static hasValidBoxAt(bytes: Uint8Array, start: number, end: number): boolean {

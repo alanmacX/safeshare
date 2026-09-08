@@ -1,4 +1,5 @@
 import { image } from '@kit.ImageKit';
+import { photoAccessHelper } from '@kit.MediaLibraryKit';
 
 export enum RiskLevel {
   LOW = 'LOW',
@@ -89,6 +90,8 @@ export class PrivacyScanResult {
   readOnlyTool: boolean = false;
   scanFailed: boolean = false;
   mimeType: string = '';
+  isMovingPhoto: boolean = false;
+  visualEditsSupported: boolean = true;
   // Video previews are decoded by the media service, never by the image
   // privacy/redaction pipeline. The page only renders this system PixelMap.
   previewPixelMap: image.PixelMap | undefined = undefined;
@@ -111,6 +114,10 @@ export class SanitizedFile {
   byteSize: number = 0;
   fileKind: string = 'IMAGE';
   sourceIndex: number = -1;
+  isMovingPhoto: boolean = false;
+  // Keep the native object alive while its composite URI is shared.
+  movingPhotoRef: photoAccessHelper.MovingPhoto | undefined = undefined;
+  cleanupPaths: string[] = [];
 
   constructor(path: string, uri: string, verification: PrivacyScanResult,
     utd: string = 'general.jpeg', mimeType: string = 'image/jpeg') {

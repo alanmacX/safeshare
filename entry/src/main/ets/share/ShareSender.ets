@@ -53,7 +53,11 @@ export class ShareSender {
 
   private scheduleAll(manager: TempFileManager, files: SanitizedFile[], delayMs: number = 120000): void {
     for (let index: number = 0; index < files.length; index++) {
-      manager.scheduleRemoval(files[index].path, delayMs);
+      const paths: string[] = files[index].cleanupPaths.length > 0 ?
+        files[index].cleanupPaths : [files[index].path];
+      for (let pathIndex: number = 0; pathIndex < paths.length; pathIndex++) {
+        manager.scheduleRemoval(paths[pathIndex], delayMs);
+      }
     }
   }
 

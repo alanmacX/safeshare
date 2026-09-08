@@ -414,6 +414,14 @@ struct Index {
   /** Builds one independent policy from the findings of exactly one file. */
   private metadataPolicyForFile(sourceIndex: number): MetadataPolicy {
     const policy: MetadataPolicy = this.currentMetadataPolicy();
+    // A MovingPhoto remains a composite photo+video asset. Its first release
+    // supports metadata cleanup only, so never pass still-image watermark
+    // settings into that dedicated pipeline. The scan result also surfaces
+    // this limitation to the user instead of silently flattening the asset.
+    if (sourceIndex < this.scanResults.length && this.scanResults[sourceIndex].isMovingPhoto) {
+      policy.purposeWatermark = '';
+      policy.imageWatermarkUri = '';
+    }
     policy.mode = MetadataMode.CUSTOM;
     policy.preserveCaptureTime = false;
     policy.preserveCameraInfo = false;
@@ -934,6 +942,13 @@ struct Index {
     return this.isAvSession() && FileTypeRouter.isAudioUri(this.currentPreviewUri());
   }
 
+  private hasMovingPhoto(): boolean {
+    for (let index: number = 0; index < this.scanResults.length; index++) {
+      if (this.scanResults[index].isMovingPhoto) return true;
+    }
+    return false;
+  }
+
   private currentMediaMimeType(): string {
     if (this.status === PageStatus.READY && this.showSafePreview) {
       const safeFile: SanitizedFile | undefined = this.sanitizedFileForSource(this.previewIndex);
@@ -1135,7 +1150,9 @@ struct Index {
       }
       this.message = failedCount > 0 ?
         `${this.selectedUris.length - failedCount}/${this.selectedUris.length} 个文件已完成检查` :
-        (this.featureMode === FeatureMode.WATERMARK ? '照片已就绪，请设置水印' :
+        (this.featureMode === FeatureMode.WATERMARK ?
+          (this.hasMovingPhoto() ? '照片已就绪；动态照片只执行 metadata 清理，不添加水印' :
+            '照片已就绪，请设置水印') :
         (this.isAvSession() ? (allFindings.length === 0 ? '未发现可读取的隐私元数据' :
           `已读取 ${allFindings.length} 项音视频隐私元数据`) :
           (allFindings.length === 0 ? '已完成的检查中未发现常见隐私风险' :

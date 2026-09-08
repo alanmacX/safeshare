@@ -209,6 +209,48 @@ export class AvPrivacyTool {
     }
   }
 
+  /**
+   * Preserves every MovingPhoto video track and encoded byte. Only bounded,
+   * privacy-bearing moov values are overwritten in an app-sandbox copy.
+   */
+  async sanitizeMovingPhotoComponent(uri: string): Promise<SanitizedFile> {
+    let outputPath: string = '';
+    let source: fileIo.File | undefined = undefined;
+    let target: fileIo.File | undefined = undefined;
+    try {
+      source = await fileIo.open(uri, fileIo.OpenMode.READ_ONLY);
+      const size: number = fileIo.statSync(source.fd).size;
+      if (size <= 0) throw new Error('EMPTY_MEDIA');
+      outputPath = this.tempFiles.createOutputPath('moving-photo-video.mp4', 'mp4');
+      target = await fileIo.open(outputPath,
+        fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
+      await fileIo.copyFile(source.fd, target.fd);
+      if (!IsoBmffMetadataReader.sanitizePrivacyMetadata(target.fd, size)) {
+        throw new Error('MOVING_PHOTO_CONTAINER_UNSUPPORTED');
+      }
+      fileIo.closeSync(target);
+      target = undefined;
+      fileIo.closeSync(source);
+      source = undefined;
+      const outputUri: string = fileUri.getUriFromPath(outputPath);
+      const verification: PrivacyScanResult = await this.scan(outputUri);
+      if (verification.scanFailed || verification.findings.length > 0) {
+        throw new Error('MOVING_PHOTO_METADATA_REMAINS');
+      }
+      const sanitized = new SanitizedFile(outputPath, outputUri, verification,
+        'general.mpeg-4', 'video/mp4');
+      sanitized.fileKind = 'AUDIO_VIDEO';
+      sanitized.byteSize = fileIo.statSync(outputPath).size;
+      return sanitized;
+    } catch (error) {
+      if (outputPath.length > 0) await this.tempFiles.remove(outputPath);
+      throw error as Error;
+    } finally {
+      try { if (target !== undefined) fileIo.closeSync(target); } catch (_) {}
+      try { if (source !== undefined) fileIo.closeSync(source); } catch (_) {}
+    }
+  }
+
   private containsVideo(metadata: media.AVMetadata, uri: string): boolean {
     return metadata.hasVideo === 'yes' || metadata.hasVideo === 'true' ||
       metadata.videoWidth !== undefined || FileTypeRouter.isVideoUri(uri);
@@ -252,6 +294,7 @@ export class AvPrivacyTool {
       const value: string | undefined = info[key];
       if (value === undefined || value.trim().length === 0) continue;
       const normalized: string = key.toLowerCase();
+      if (this.isMotionStructureKey(normalized)) continue;
       if (this.hasAny(normalized, ['location', 'latitude', 'longitude', 'gps', 'iso6709'])) {
         this.pushCustom(findings, key, 'AV_CUSTOM_LOCATION', RiskLevel.HIGH,
           '包含录制位置', '视频扩展元数据包含位置或坐标信息。', value);
@@ -281,6 +324,7 @@ export class AvPrivacyTool {
     for (let index: number = 0; index < items.length; index++) {
       const item: IsoMetadataItem = items[index];
       const normalized: string = item.key.toLowerCase();
+      if (this.isMotionStructureKey(normalized)) continue;
       if (this.hasAny(normalized, ['location.accuracy', 'gps.accuracy'])) {
         this.pushCustom(findings, item.key, 'AV_LOCATION_ACCURACY', RiskLevel.LOW,
           '包含位置精度', '视频容器记录了定位精度。', item.value);
@@ -315,6 +359,14 @@ export class AvPrivacyTool {
       if (value.indexOf(needles[index]) >= 0) return true;
     }
     return false;
+  }
+
+  private isMotionStructureKey(normalizedKey: string): boolean {
+    // These values link the cover to its timed frame. They are functional
+    // structure, not user privacy metadata, and clearing them breaks motion.
+    return normalizedKey.indexOf('still-image-time') >= 0 ||
+      normalizedKey.indexOf('motion-photo') >= 0 || normalizedKey.indexOf('motionphoto') >= 0 ||
+      normalizedKey.indexOf('microvideo') >= 0;
   }
 
   private pushCustom(findings: PrivacyFinding[], key: string, subtype: string, risk: RiskLevel,

@@ -73,6 +73,7 @@ export class FileTypeRouter {
     if (AV_EXTENSIONS.indexOf(extension) >= 0) return FileKind.AUDIO_VIDEO;
     if (IMAGE_EXTENSIONS.indexOf(extension) >= 0) return FileKind.IMAGE;
 
+    if (utd === 'openharmony.moving-photo') return FileKind.IMAGE;
     if (PDF_UTDS.indexOf(utd) >= 0) return FileKind.PDF;
     if (WORD_UTDS.indexOf(utd) >= 0) return FileKind.WORD;
     if (EXCEL_UTDS.indexOf(utd) >= 0) return FileKind.EXCEL;

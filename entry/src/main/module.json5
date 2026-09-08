@@ -8,6 +8,16 @@
     "deliveryWithInstall": true,
     "installationFree": false,
     "pages": "$profile:main_pages",
+    "requestPermissions": [
+      {
+        "name": "ohos.permission.READ_IMAGEVIDEO",
+        "reason": "$string:read_moving_photo_reason",
+        "usedScene": {
+          "abilities": ["PrivacyEntryAbility"],
+          "when": "inuse"
+        }
+      }
+    ],
     "metadata": [
       {
         "name": "configColorModeChangePerformanceInArkUI",
@@ -48,6 +58,8 @@
           {
             "actions": ["ohos.want.action.sendData"],
             "uris": [
+              { "scheme": "file", "utd": "openharmony.moving-photo", "maxFileSupported": 20 },
+              { "scheme": "content", "utd": "openharmony.moving-photo", "maxFileSupported": 20 },
               { "scheme": "file", "utd": "general.jpeg", "maxFileSupported": 50 },
               { "scheme": "content", "utd": "general.jpeg", "maxFileSupported": 50 },
               { "scheme": "file", "utd": "general.png", "maxFileSupported": 50 },

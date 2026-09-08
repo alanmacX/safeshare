@@ -8,6 +8,7 @@ import { ImagePrivacyProcessor } from '../processors/ImagePrivacyProcessor';
 import { PdfPrivacyProcessor, PdfWatermarkOptions } from '../processors/DocumentPrivacyProcessor';
 import { OoxmlFamilyTool } from '../processors/OoxmlPrivacyProcessor';
 import { AvPrivacyTool } from '../processors/AvPrivacyProcessor';
+import { MovingPhotoPrivacyTool } from '../processors/MovingPhotoPrivacyProcessor';
 import { FileKind, FileTypeRouter } from '../processors/FileTypeRouter';
 import { FileSignatureRouter } from '../processors/FileSignatureRouter';
 import { MetadataPolicy } from '../metadata/MetadataPolicy';
@@ -32,6 +33,8 @@ export class SafeShareService {
   private excelTool: OoxmlFamilyTool;
   private powerpointTool: OoxmlFamilyTool;
   private avTool: AvPrivacyTool;
+  private movingPhotoTool: MovingPhotoPrivacyTool;
+  private movingPhotoUris: string[] = [];
   private sender: ShareSender;
   private tempFiles: TempFileManager;
 
@@ -43,6 +46,7 @@ export class SafeShareService {
     this.excelTool = new OoxmlFamilyTool(FileKind.EXCEL, 'Excel 表格', context);
     this.powerpointTool = new OoxmlFamilyTool(FileKind.POWERPOINT, 'PPT 演示文稿', context);
     this.avTool = new AvPrivacyTool(context);
+    this.movingPhotoTool = new MovingPhotoPrivacyTool(context);
     this.sender = new ShareSender(context);
     this.tempFiles = new TempFileManager(context);
   }
@@ -78,6 +82,10 @@ export class SafeShareService {
   }
 
   async resolveKind(uri: string, utd: string = ''): Promise<FileKind> {
+    if (utd === 'openharmony.moving-photo' || await this.movingPhotoTool.isMovingPhoto(uri)) {
+      this.rememberMovingPhoto(uri);
+      return FileKind.IMAGE;
+    }
     // URI path fragments are provider implementation details and may contain
     // a misleading suffix. Prefer the opened file's signature/display name;
     // use the supplied per-record UTD and URI only when probing is unavailable.
@@ -92,6 +100,12 @@ export class SafeShareService {
     resolvedKind: FileKind = FileKind.UNKNOWN): Promise<PrivacyScanResult> {
     const kind: FileKind = resolvedKind === FileKind.UNKNOWN ? await this.resolveKind(uri, utd) : resolvedKind;
     if (kind === FileKind.IMAGE) {
+      if (this.isKnownMovingPhoto(uri) || await this.movingPhotoTool.isMovingPhoto(uri)) {
+        this.rememberMovingPhoto(uri);
+        const result: PrivacyScanResult = await this.movingPhotoTool.scan(uri);
+        result.fileKind = FileKind.IMAGE;
+        return result;
+      }
       const result: PrivacyScanResult = await this.imageProcessor.scan(uri);
       result.fileKind = FileKind.IMAGE;
       return result;
@@ -131,6 +145,11 @@ export class SafeShareService {
     pdfWatermark?: PdfWatermarkOptions): Promise<SanitizedFile> {
     const kind: FileKind = resolvedKind === FileKind.UNKNOWN ? await this.resolveKind(uri, utd) : resolvedKind;
     if (kind === FileKind.IMAGE) {
+      if (this.isKnownMovingPhoto(uri) || utd === 'openharmony.moving-photo' ||
+        await this.movingPhotoTool.isMovingPhoto(uri)) {
+        this.rememberMovingPhoto(uri);
+        return await this.movingPhotoTool.sanitize(uri, actions, policy);
+      }
       const file: SanitizedFile = await this.imageProcessor.sanitize(uri, actions, policy);
       file.fileKind = FileKind.IMAGE;
       return file;
@@ -199,7 +218,7 @@ export class SafeShareService {
       return files;
     } catch (error) {
       for (let index: number = 0; index < files.length; index++) {
-        await this.tempFiles.remove(files[index].path);
+        await this.removeSanitizedFile(files[index]);
       }
       const stage: string = (error as Error).message;
       // Stage-coded failures keep their specific message so the UI can show
@@ -224,7 +243,7 @@ export class SafeShareService {
 
   async discardSanitized(files: SanitizedFile[]): Promise<void> {
     for (let index: number = 0; index < files.length; index++) {
-      await this.tempFiles.remove(files[index].path);
+      await this.removeSanitizedFile(files[index]);
     }
   }
 
@@ -236,6 +255,19 @@ export class SafeShareService {
     if (kind === FileKind.EXCEL) return this.excelTool;
     if (kind === FileKind.POWERPOINT) return this.powerpointTool;
     return this.wordTool;
+  }
+
+  private isKnownMovingPhoto(uri: string): boolean {
+    return this.movingPhotoUris.indexOf(uri) >= 0;
+  }
+
+  private rememberMovingPhoto(uri: string): void {
+    if (!this.isKnownMovingPhoto(uri)) this.movingPhotoUris.push(uri);
+  }
+
+  private async removeSanitizedFile(file: SanitizedFile): Promise<void> {
+    const paths: string[] = file.cleanupPaths.length > 0 ? file.cleanupPaths : [file.path];
+    for (let index: number = 0; index < paths.length; index++) await this.tempFiles.remove(paths[index]);
   }
 
   private documentOutput(copyPath: string, verification: PrivacyScanResult,
