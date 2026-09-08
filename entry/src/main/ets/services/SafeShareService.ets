@@ -12,6 +12,7 @@ import { MovingPhotoPrivacyTool } from '../processors/MovingPhotoPrivacyProcesso
 import { FileKind, FileTypeRouter } from '../processors/FileTypeRouter';
 import { FileSignatureRouter } from '../processors/FileSignatureRouter';
 import { MetadataPolicy } from '../metadata/MetadataPolicy';
+import { MediaCapability, MediaCapabilityRegistry } from '../metadata/MediaCapabilityRegistry';
 import { filePreview } from '@kit.PreviewKit';
 
 import { hilog } from '@kit.PerformanceAnalysisKit';
@@ -35,6 +36,7 @@ export class SafeShareService {
   private avTool: AvPrivacyTool;
   private movingPhotoTool: MovingPhotoPrivacyTool;
   private movingPhotoUris: string[] = [];
+  private capabilitiesByUri: Map<string, MediaCapability> = new Map();
   private sender: ShareSender;
   private tempFiles: TempFileManager;
 
@@ -104,36 +106,36 @@ export class SafeShareService {
         this.rememberMovingPhoto(uri);
         const result: PrivacyScanResult = await this.movingPhotoTool.scan(uri);
         result.fileKind = FileKind.IMAGE;
-        return result;
+        return this.applyCapability(result, FileKind.IMAGE);
       }
       const result: PrivacyScanResult = await this.imageProcessor.scan(uri);
       result.fileKind = FileKind.IMAGE;
-      return result;
+      return this.applyCapability(result, FileKind.IMAGE);
     }
     if (kind === FileKind.PDF) {
       const result: PrivacyScanResult = await this.pdfTool.scan(uri);
       result.fileKind = FileKind.PDF;
-      return result;
+      return this.applyCapability(result, FileKind.PDF);
     }
     if (kind === FileKind.WORD) {
       const result: PrivacyScanResult = await this.wordTool.scan(uri);
       result.fileKind = FileKind.WORD;
-      return result;
+      return this.applyCapability(result, FileKind.WORD);
     }
     if (kind === FileKind.EXCEL) {
       const result: PrivacyScanResult = await this.excelTool.scan(uri);
       result.fileKind = FileKind.EXCEL;
-      return result;
+      return this.applyCapability(result, FileKind.EXCEL);
     }
     if (kind === FileKind.POWERPOINT) {
       const result: PrivacyScanResult = await this.powerpointTool.scan(uri);
       result.fileKind = FileKind.POWERPOINT;
-      return result;
+      return this.applyCapability(result, FileKind.POWERPOINT);
     }
     if (kind === FileKind.AUDIO_VIDEO) {
       const result: PrivacyScanResult = await this.avTool.scan(uri);
       result.fileKind = FileKind.AUDIO_VIDEO;
-      return result;
+      return this.applyCapability(result, FileKind.AUDIO_VIDEO);
     }
     throw new Error('Unsupported file type.');
   }
@@ -144,6 +146,7 @@ export class SafeShareService {
     resolvedKind: FileKind = FileKind.UNKNOWN,
     pdfWatermark?: PdfWatermarkOptions): Promise<SanitizedFile> {
     const kind: FileKind = resolvedKind === FileKind.UNKNOWN ? await this.resolveKind(uri, utd) : resolvedKind;
+    this.assertSupportedOperations(uri, actions, policy, pdfWatermark);
     if (kind === FileKind.IMAGE) {
       if (this.isKnownMovingPhoto(uri) || utd === 'openharmony.moving-photo' ||
         await this.movingPhotoTool.isMovingPhoto(uri)) {
@@ -268,6 +271,48 @@ export class SafeShareService {
   private async removeSanitizedFile(file: SanitizedFile): Promise<void> {
     const paths: string[] = file.cleanupPaths.length > 0 ? file.cleanupPaths : [file.path];
     for (let index: number = 0; index < paths.length; index++) await this.tempFiles.remove(paths[index]);
+  }
+
+  private applyCapability(result: PrivacyScanResult, kind: FileKind): PrivacyScanResult {
+    const multiFrame: boolean = result.formatId === 'gif' || result.formatId === 'webp-animated' ||
+      result.formatId === 'heif-sequence';
+    const capability: MediaCapability = MediaCapabilityRegistry.forResult(kind, result.mimeType,
+      result.isMovingPhoto, multiFrame, result.readOnlyTool);
+    result.formatId = capability.id;
+    result.formatLabel = capability.label;
+    result.metadataCleanSupported = capability.metadataClean;
+    result.visualEditsSupported = capability.textWatermark || capability.imageWatermark ||
+      capability.face || capability.qr;
+    result.textWatermarkSupported = capability.textWatermark;
+    result.imageWatermarkSupported = capability.imageWatermark;
+    result.faceSupported = capability.face;
+    result.qrSupported = capability.qr;
+    result.losslessMetadata = capability.losslessMetadata;
+    result.readOnlyTool = result.readOnlyTool || !capability.metadataClean;
+    if (capability.note.length > 0 && result.capabilityWarnings.indexOf(capability.note) < 0) {
+      result.capabilityWarnings.push(capability.note);
+    }
+    if (result.uri.length > 0) this.capabilitiesByUri.set(result.uri, capability);
+    return result;
+  }
+
+  private assertSupportedOperations(uri: string, actions: RedactionAction[], policy: MetadataPolicy,
+    pdfWatermark?: PdfWatermarkOptions): void {
+    const capability: MediaCapability | undefined = this.capabilitiesByUri.get(uri);
+    if (capability === undefined) return;
+    if (!capability.metadataClean) throw new Error('FORMAT_METADATA_CLEAN_UNSUPPORTED');
+    if (policy.purposeWatermark.trim().length > 0 && !capability.textWatermark) {
+      throw new Error('FORMAT_TEXT_WATERMARK_UNSUPPORTED');
+    }
+    if (policy.imageWatermarkUri.length > 0 && !capability.imageWatermark) {
+      throw new Error('FORMAT_IMAGE_WATERMARK_UNSUPPORTED');
+    }
+    if (pdfWatermark !== undefined && !capability.textWatermark) {
+      throw new Error('FORMAT_TEXT_WATERMARK_UNSUPPORTED');
+    }
+    for (let index: number = 0; index < actions.length; index++) {
+      if (!capability.face && !capability.qr) throw new Error('FORMAT_VISUAL_EDIT_UNSUPPORTED');
+    }
   }
 
   private documentOutput(copyPath: string, verification: PrivacyScanResult,

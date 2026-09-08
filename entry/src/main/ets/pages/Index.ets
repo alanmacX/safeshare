@@ -21,6 +21,7 @@ import { WatermarkAsset } from '../storage/TempFileManager';
 import { PdfWatermarkOptions } from '../processors/DocumentPrivacyProcessor';
 import { FileKind, FileTypeRouter } from '../processors/FileTypeRouter';
 import { BatchLiveViewService } from '../services/BatchLiveViewService';
+import { MediaCapability, MediaCapabilityRegistry } from '../metadata/MediaCapabilityRegistry';
 
 enum PageStatus {
   HOME = 'HOME',
@@ -414,6 +415,10 @@ struct Index {
   /** Builds one independent policy from the findings of exactly one file. */
   private metadataPolicyForFile(sourceIndex: number): MetadataPolicy {
     const policy: MetadataPolicy = this.currentMetadataPolicy();
+    if (this.featureMode !== FeatureMode.WATERMARK && !this.watermarkApplied) {
+      policy.purposeWatermark = '';
+      policy.imageWatermarkUri = '';
+    }
     // A MovingPhoto remains a composite photo+video asset. Its first release
     // supports metadata cleanup only, so never pass still-image watermark
     // settings into that dedicated pipeline. The scan result also surfaces
@@ -421,6 +426,10 @@ struct Index {
     if (sourceIndex < this.scanResults.length && this.scanResults[sourceIndex].isMovingPhoto) {
       policy.purposeWatermark = '';
       policy.imageWatermarkUri = '';
+    }
+    if (sourceIndex < this.scanResults.length) {
+      if (!this.scanResults[sourceIndex].textWatermarkSupported) policy.purposeWatermark = '';
+      if (!this.scanResults[sourceIndex].imageWatermarkSupported) policy.imageWatermarkUri = '';
     }
     policy.mode = MetadataMode.CUSTOM;
     policy.preserveCaptureTime = false;
@@ -949,6 +958,21 @@ struct Index {
     return false;
   }
 
+  private currentTextWatermarkSupported(): boolean {
+    return this.previewIndex < this.scanResults.length &&
+      this.scanResults[this.previewIndex].textWatermarkSupported;
+  }
+
+  private currentImageWatermarkSupported(): boolean {
+    return this.previewIndex < this.scanResults.length &&
+      this.scanResults[this.previewIndex].imageWatermarkSupported;
+  }
+
+  private watermarkUnsupportedAt(index: number): boolean {
+    return this.featureMode === FeatureMode.WATERMARK && index < this.scanResults.length &&
+      !this.scanResults[index].textWatermarkSupported && !this.scanResults[index].imageWatermarkSupported;
+  }
+
   private currentMediaMimeType(): string {
     if (this.status === PageStatus.READY && this.showSafePreview) {
       const safeFile: SanitizedFile | undefined = this.sanitizedFileForSource(this.previewIndex);
@@ -979,7 +1003,7 @@ struct Index {
           FileTypeRouter.detect(this.selectedUris[index], this.selectedUtds[index] ?? ''));
       const readOnly: boolean = index < this.scanResults.length ? this.scanResults[index].readOnlyTool :
         (kind === FileKind.AUDIO_VIDEO && FileTypeRouter.isAudioUri(this.selectedUris[index]));
-      if (kind !== FileKind.UNKNOWN && !readOnly) count++;
+      if (kind !== FileKind.UNKNOWN && !readOnly && !this.watermarkUnsupportedAt(index)) count++;
     }
     return count;
   }
@@ -1151,8 +1175,8 @@ struct Index {
       this.message = failedCount > 0 ?
         `${this.selectedUris.length - failedCount}/${this.selectedUris.length} 个文件已完成检查` :
         (this.featureMode === FeatureMode.WATERMARK ?
-          (this.hasMovingPhoto() ? '照片已就绪；动态照片只执行 metadata 清理，不添加水印' :
-            '照片已就绪，请设置水印') :
+          (this.sanitizableFileCount() === 0 ? '此格式不支持水印，可使用隐私处理清理元数据' :
+            (this.hasMovingPhoto() ? '照片已就绪；动态照片不添加水印' : '照片已就绪，请设置水印')) :
         (this.isAvSession() ? (allFindings.length === 0 ? '未发现可读取的隐私元数据' :
           `已读取 ${allFindings.length} 项音视频隐私元数据`) :
           (allFindings.length === 0 ? '已完成的检查中未发现常见隐私风险' :
@@ -1224,7 +1248,9 @@ struct Index {
       const resolvedKinds: FileKind[] = this.scanResults.map((result: PrivacyScanResult) =>
         result.fileKind as FileKind);
       const readOnlyFiles: boolean[] = this.scanResults.map((result: PrivacyScanResult) =>
-        result.readOnlyTool || result.scanFailed);
+        result.readOnlyTool || result.scanFailed ||
+          (this.featureMode === FeatureMode.WATERMARK &&
+            !result.textWatermarkSupported && !result.imageWatermarkSupported));
       this.flowLog('ui_sanitize_begin');
       const pdfWatermark: PdfWatermarkOptions | undefined =
         this.trackedFileKind === FileKind.PDF ? this.pdfWatermarkRequest() : undefined;
@@ -2230,7 +2256,8 @@ struct Index {
   WatermarkPreviewOverlay() {
     // Live preview must follow the watermark toggle, not the share-entry
     // mode: users enable the watermark on the result page of a privacy run.
-    if ((this.featureMode === FeatureMode.WATERMARK || this.watermarkApplied) &&
+    if (this.currentTextWatermarkSupported() &&
+      (this.featureMode === FeatureMode.WATERMARK || this.watermarkApplied) &&
       this.purposeWatermark.trim().length > 0 && this.status !== PageStatus.READY) {
       Column({ space: 34 * this.watermarkSpacing }) {
         ForEach([0, 1, 2, 3, 4, 5, 6, 7, 8, 9], (row: number) => {
@@ -2430,7 +2457,8 @@ struct Index {
 
   @Builder
   ImageWatermarkPreviewOverlay() {
-    if ((this.featureMode === FeatureMode.WATERMARK || this.watermarkApplied) &&
+    if (this.currentImageWatermarkSupported() &&
+      (this.featureMode === FeatureMode.WATERMARK || this.watermarkApplied) &&
       this.imageWatermarkUri.length > 0 && this.status !== PageStatus.READY) {
       if (this.imageWatermarkTiled) {
         ForEach([0, 1, 2, 3], (row: number) => {
@@ -2985,6 +3013,8 @@ struct Index {
             () => this.animateSettingsTo('watermark'))
           this.SettingsCategoryRow('文件处理', '设置默认行为',
             () => this.animateSettingsTo('files'))
+          this.SettingsCategoryRow('支持范围', '媒体与文档',
+            () => this.animateSettingsTo('support'))
         }
         .width('100%')
       } else {
@@ -3014,6 +3044,12 @@ struct Index {
               }
               .width('100%')
               .transition(this.settingsPageTransition())
+            } else if (this.settingsPage === 'support') {
+              Column() {
+                this.SettingsSupportPageContent()
+              }
+              .width('100%')
+              .transition(this.settingsPageTransition())
             }
           }
           .width('100%').padding({ bottom: 24 })
@@ -3034,6 +3070,7 @@ struct Index {
     if (this.settingsPage === 'visual') return '隐私打码';
     if (this.settingsPage === 'watermark') return '水印';
     if (this.settingsPage === 'files') return '文件处理';
+    if (this.settingsPage === 'support') return '支持范围';
     return '默认设置';
   }
 
@@ -3153,6 +3190,22 @@ struct Index {
           this.docContentTimeDefault = value;
           this.saveMetadataDefaults();
         })
+    }.width('100%')
+  }
+
+  @Builder
+  SettingsSupportPageContent() {
+    Column({ space: 8 }) {
+      ForEach(MediaCapabilityRegistry.supportCatalog(), (item: MediaCapability) => {
+        HdsListItemCard({
+          textItem: {
+            primaryText: { text: item.label },
+            secondaryText: { text: item.note.length > 0 ?
+              `${MediaCapabilityRegistry.compactOperations(item)}；${item.note}` :
+              MediaCapabilityRegistry.compactOperations(item) }
+          }
+        })
+      }, (item: MediaCapability) => item.id)
     }.width('100%')
   }
 
@@ -3568,7 +3621,7 @@ struct Index {
         // (onFinish) optionsRemoved unmounts it so the space backfills.
         if (!this.optionsRemoved) {
         Column({ space: 18 * this.tabletUiScale() }) {
-        if (this.capabilityWarnings.length > 0 && !this.isAvSession()) {
+        if (this.capabilityWarnings.length > 0) {
           Column({ space: 6 }) {
             ForEach(this.capabilityWarnings, (warning: string) => {
               Row({ space: 8 }) {
@@ -3693,7 +3746,8 @@ struct Index {
         // Reachability spacer: guarantees the last card can scroll above the
         // floating capsule tab bar and the FAB. Horizontal inset lives on the
         // content, not the Scroll, so the scrollbar hugs the device edge.
-        if (this.status === PageStatus.RESULT && this.isImageSession()) {
+        if (this.status === PageStatus.RESULT && this.isImageSession() &&
+          (this.currentTextWatermarkSupported() || this.currentImageWatermarkSupported())) {
           Column({ space: 10 }) {
             Row() {
               Column({ space: 3 }) {

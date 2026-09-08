@@ -92,6 +92,14 @@ export class PrivacyScanResult {
   mimeType: string = '';
   isMovingPhoto: boolean = false;
   visualEditsSupported: boolean = true;
+  formatId: string = '';
+  formatLabel: string = '';
+  metadataCleanSupported: boolean = true;
+  textWatermarkSupported: boolean = false;
+  imageWatermarkSupported: boolean = false;
+  faceSupported: boolean = false;
+  qrSupported: boolean = false;
+  losslessMetadata: boolean = false;
   // Video previews are decoded by the media service, never by the image
   // privacy/redaction pipeline. The page only renders this system PixelMap.
   previewPixelMap: image.PixelMap | undefined = undefined;

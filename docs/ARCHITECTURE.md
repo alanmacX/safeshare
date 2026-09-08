@@ -8,7 +8,8 @@ Gallery / Files / Browser
   → systemShare.getSharedData
   → ImagePrivacyProcessor
       → MetadataScanner
-      → one normalized RGBA detection PixelMap (max edge 1600)
+      → MediaCapabilityRegistry（先决定可用能力）
+      → eligible formats only: one normalized RGBA detection PixelMap (max edge 1600)
           → QR → Face (sequential, shared coordinates)
   → findings shown directly (no synthetic privacy score)
   → MetadataSanitizer (decode pixels → selected redaction → format-aware encoding)
@@ -22,13 +23,17 @@ Gallery / Files / Browser
 每种文件类型有独立工具链，不混用语义。`FileTypeRouter`（extension → UTD 兜底）判定
 `FileKind`，`SafeShareService` 只做路由：
 
+`MediaCapabilityRegistry` 是格式能力的单一事实源。扫描结果携带格式及 metadata、
+水印、人脸、二维码能力；视觉模型运行前和副本生成前各执行一次门禁。结果提示和
+设置中的“支持范围”也读取同一注册表，避免 UI 与实际处理路径漂移。
+
 | FileKind | 扫描工具 | 清理方式 | 输出验证 |
 |---|---|---|---|
 | IMAGE | MetadataScanner + QR/Face 端侧视觉 | 像素重编码 + 局部遮盖 | MetadataScanner 复检 + 视觉复检 |
 | MOVING_PHOTO（UI 归类为 IMAGE） | `PhotoAsset.PHOTO_SUBTYPE` 识别后拆分封面与视频，分别使用图片与 ISO-BMFF 扫描器 | 封面原格式 metadata 路径；视频仅定长清除隐私 `moov` 值，保留全部轨道、样本和动态照片锚点；`loadMovingPhoto` 重组 | 封面和视频分别零 finding 后才产生组合 URI；两个沙箱组件按同一生命周期清理 |
 | PDF | PDF Kit `PdfDocument.getMetadata()`（title/author/subject/keywords/creator/producer/创建/修改时间） | PDF Kit `loadDocument → saveDocument` 重写副本 | 重扫副本须零 finding，否则删除输出 |
 | WORD/EXCEL/POWERPOINT | `OoxmlFamilyTool`：解析 ZIP → 解压 `docProps/core.xml`、`app.xml`、`custom.xml`，解析 dc:creator / cp:lastModifiedBy / Company / Manager / 自定义属性等 | 自建 `ZipContainer` 重打包：仅重写三个 docProps 条目（STORE 模式、XML 结构保持有效），其余条目原字节拷贝，时间戳固定 | 重扫副本须零 finding，否则删除输出 |
-| AUDIO_VIDEO | `AVMetadataExtractor`（location/dateTime/author/artist 等） | **无**。HarmonyOS 无本地去除接口，如实告知，不伪造副本 | — |
+| AUDIO_VIDEO | `AVMetadataExtractor` + ISO-BMFF 容器字段 | MP4/M4A 复制编码轨道重封装；其他音频只读 | 输出重扫须零 finding，否则删除 |
 
 入口范围：`PrivacyEntryAbility` skills 声明 `general.image` / `com.adobe.pdf` /
 `org.openxmlformats.wordprocessingml.document` / `spreadsheetml.sheet` /

@@ -1,6 +1,8 @@
 import { describe, expect, it } from '@ohos/hypium';
 import { GifMetadata, GifMetadataSummary } from '../main/ets/metadata/GifMetadata';
 import { ContainerMetadata, ContainerMetadataSummary } from '../main/ets/metadata/ContainerMetadata';
+import { MediaCapabilityRegistry, SupportGrade } from '../main/ets/metadata/MediaCapabilityRegistry';
+import { FileKind } from '../main/ets/processors/FileTypeRouter';
 
 function bytes(values: number[]): Uint8Array {
   return new Uint8Array(values);
@@ -67,6 +69,35 @@ export default function testsuite(): void {
           output[index + 2] === 0x49 && output[index + 3] === 0x4D) hasAnimation = true;
       }
       expect(hasAnimation).assertTrue();
+    });
+  });
+
+  describe('MediaCapabilityRegistry', (): void => {
+    it('keeps animated and HDR-safe formats metadata-only', 0, (): void => {
+      const gif = MediaCapabilityRegistry.image('image/gif', true);
+      const heif = MediaCapabilityRegistry.image('image/heif', false);
+      expect(gif.metadataClean).assertTrue();
+      expect(gif.face).assertFalse();
+      expect(gif.textWatermark).assertFalse();
+      expect(heif.losslessMetadata).assertTrue();
+      expect(heif.imageWatermark).assertFalse();
+    });
+
+    it('opens visual tools only for eligible still images', 0, (): void => {
+      const jpeg = MediaCapabilityRegistry.image('image/jpeg', false);
+      const tiff = MediaCapabilityRegistry.image('image/tiff', false);
+      expect(jpeg.face).assertTrue();
+      expect(jpeg.qr).assertTrue();
+      expect(tiff.face).assertFalse();
+      expect(tiff.metadataClean).assertTrue();
+    });
+
+    it('marks unsupported audio cleanup before processing', 0, (): void => {
+      const audio = MediaCapabilityRegistry.forResult(FileKind.AUDIO_VIDEO,
+        'audio/mpeg', false, false, true);
+      expect(audio.grade).assertEqual(SupportGrade.READ_ONLY);
+      expect(audio.metadataScan).assertTrue();
+      expect(audio.metadataClean).assertFalse();
     });
   });
 }

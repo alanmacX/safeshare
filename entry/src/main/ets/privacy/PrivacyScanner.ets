@@ -6,6 +6,7 @@ import { MetadataScanner } from '../metadata/MetadataScanner';
 import { FaceScanner } from '../vision/FaceScanner';
 import { QRScanner } from '../vision/QRScanner';
 import { TempFileManager } from '../storage/TempFileManager';
+import { MediaCapability, MediaCapabilityRegistry } from '../metadata/MediaCapabilityRegistry';
 
 const DETECTION_MAX_EDGE: number = 1600;
 
@@ -27,6 +28,7 @@ export class PrivacyScanner {
     let pixelHeight: number = 0;
     let mimeType: string = '';
     let multiFrame: boolean = false;
+    let capability: MediaCapability = MediaCapabilityRegistry.image('', false);
 
     let sourceFile: fileIo.File | undefined = undefined;
     let source: image.ImageSource | undefined = undefined;
@@ -37,24 +39,10 @@ export class PrivacyScanner {
       const sourceInfo: image.ImageInfo = await source.getImageInfo();
       mimeType = sourceInfo.mimeType;
       try { multiFrame = await source.getFrameCount() > 1; } catch (_) {}
-      const metadataOnlyAnimation: boolean = multiFrame &&
-        (sourceInfo.mimeType === 'image/gif' || sourceInfo.mimeType === 'image/webp' ||
-        sourceInfo.mimeType === 'image/tiff' || sourceInfo.mimeType === 'image/x-adobe-dng' ||
-        sourceInfo.mimeType === 'image/heif' || sourceInfo.mimeType === 'image/heic');
-      if (metadataOnlyAnimation) {
-        warnings.push('动画图片可无重编码清理元数据；当前版本不对各帧执行人脸、二维码或水印处理');
-      } else if (multiFrame) {
-        warnings.push('已识别为多帧图片；当前版本只检查首帧，不会生成可能丢失动画的副本');
-      }
+      capability = MediaCapabilityRegistry.image(mimeType, multiFrame);
+      if (capability.note.length > 0) warnings.push(capability.note);
       pixelWidth = sourceInfo.size.width;
       pixelHeight = sourceInfo.size.height;
-      const desired: image.Size = this.detectionSize(sourceInfo.size);
-      detectionMap = await source.createPixelMap({
-        editable: false,
-        desiredPixelFormat: image.PixelMapFormat.RGBA_8888,
-        desiredSize: desired
-      });
-      const detectionInfo: image.ImageInfo = await detectionMap.getImageInfo();
       // getImageInfo() reports the raw container size, while the UI Image
       // component renders EXIF-oriented pixels. Orientations 5-8 transpose
       // width/height, so the reported dimensions (and every consumer that
@@ -70,17 +58,25 @@ export class PrivacyScanner {
       }
       pixelWidth = transposed ? rawHeight : rawWidth;
       pixelHeight = transposed ? rawWidth : rawHeight;
-      const scaleX: number = pixelWidth / detectionInfo.size.width;
-      const scaleY: number = pixelHeight / detectionInfo.size.height;
-
-      if (!metadataOnlyAnimation) {
+      if (capability.face || capability.qr) {
+        const desired: image.Size = this.detectionSize(sourceInfo.size);
+        detectionMap = await source.createPixelMap({
+          editable: false,
+          desiredPixelFormat: image.PixelMapFormat.RGBA_8888,
+          desiredSize: desired
+        });
+        const detectionInfo: image.ImageInfo = await detectionMap.getImageInfo();
+        const scaleX: number = pixelWidth / detectionInfo.size.width;
+        const scaleY: number = pixelHeight / detectionInfo.size.height;
+        if (capability.qr) {
         try {
           findings.push(...await this.scanQrFromDetectionMap(detectionMap, scaleX, scaleY));
         } catch (_) {
           warnings.push('当前设备未完成二维码与条码检查');
         }
+        }
 
-        if (canIUse('SystemCapability.AI.Face.Detector')) {
+        if (capability.face && canIUse('SystemCapability.AI.Face.Detector')) {
           try {
             findings.push(...await this.faceScanner.scan(detectionMap, scaleX, scaleY));
           } catch (_) {
@@ -106,10 +102,22 @@ export class PrivacyScanner {
     result.pixelWidth = pixelWidth;
     result.pixelHeight = pixelHeight;
     result.mimeType = mimeType;
-    result.readOnlyTool = multiFrame && mimeType !== 'image/gif' && mimeType !== 'image/webp';
-    if (mimeType === 'image/tiff' || mimeType === 'image/x-adobe-dng') result.readOnlyTool = false;
-    if (mimeType === 'image/heif' || mimeType === 'image/heic') result.readOnlyTool = false;
+    this.applyCapability(result, capability);
     return result;
+  }
+
+  private applyCapability(result: PrivacyScanResult, capability: MediaCapability): void {
+    result.formatId = capability.id;
+    result.formatLabel = capability.label;
+    result.metadataCleanSupported = capability.metadataClean;
+    result.visualEditsSupported = capability.textWatermark || capability.imageWatermark ||
+      capability.face || capability.qr;
+    result.textWatermarkSupported = capability.textWatermark;
+    result.imageWatermarkSupported = capability.imageWatermark;
+    result.faceSupported = capability.face;
+    result.qrSupported = capability.qr;
+    result.losslessMetadata = capability.losslessMetadata;
+    result.readOnlyTool = !capability.metadataClean;
   }
 
   async verifyVisual(uri: string, actions: RedactionAction[]): Promise<PrivacyFinding[]> {
