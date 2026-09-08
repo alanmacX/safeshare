@@ -1,0 +1,11 @@
+{
+  "name": "entry",
+  "version": "1.0.0",
+  "description": "SafeShare entry module",
+  "main": "",
+  "author": "",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "libremuxer.so": "file:./src/main/cpp/types/libremuxer"
+  }
+}

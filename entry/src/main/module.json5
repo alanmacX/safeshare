@@ -1,0 +1,75 @@
+{
+  "module": {
+    "name": "entry",
+    "type": "entry",
+    "description": "$string:module_desc",
+    "mainElement": "EntryAbility",
+    "deviceTypes": ["phone", "tablet"],
+    "deliveryWithInstall": true,
+    "installationFree": false,
+    "pages": "$profile:main_pages",
+    "metadata": [
+      {
+        "name": "configColorModeChangePerformanceInArkUI",
+        "value": "true"
+      }
+    ],
+    "abilities": [
+      {
+        "name": "EntryAbility",
+        "srcEntry": "./ets/entryability/EntryAbility.ets",
+        "description": "$string:entry_desc",
+        "icon": "$media:app_icon_layered",
+        "label": "$string:app_name",
+        "startWindowIcon": "$media:app_icon_layered",
+        "startWindowBackground": "$color:start_window_background",
+        "orientation": "follow_desktop",
+        "exported": true,
+        "launchType": "singleton",
+        "skills": [
+          {
+            "entities": ["entity.system.home"],
+            "actions": ["action.system.home"]
+          }
+        ]
+      },
+      {
+        "name": "PrivacyEntryAbility",
+        "srcEntry": "./ets/entryability/PrivacyEntryAbility.ets",
+        "description": "$string:privacy_entry_desc",
+        "icon": "$media:app_icon_layered",
+        "label": "$string:privacy_entry_label",
+        "startWindowIcon": "$media:app_icon_layered",
+        "startWindowBackground": "$color:start_window_background",
+        "orientation": "follow_desktop",
+        "exported": true,
+        "launchType": "singleton",
+        "skills": [
+          {
+            "actions": ["ohos.want.action.sendData"],
+            "uris": [
+              { "scheme": "file", "utd": "general.image", "maxFileSupported": 50 },
+              { "scheme": "content", "utd": "general.image", "maxFileSupported": 50 },
+              { "scheme": "file", "utd": "com.adobe.pdf", "maxFileSupported": 20 },
+              { "scheme": "content", "utd": "com.adobe.pdf", "maxFileSupported": 20 },
+              { "scheme": "file", "utd": "org.openxmlformats.wordprocessingml.document", "maxFileSupported": 20 },
+              { "scheme": "content", "utd": "org.openxmlformats.wordprocessingml.document", "maxFileSupported": 20 },
+              { "scheme": "file", "utd": "org.openxmlformats.spreadsheetml.sheet", "maxFileSupported": 20 },
+              { "scheme": "content", "utd": "org.openxmlformats.spreadsheetml.sheet", "maxFileSupported": 20 },
+              { "scheme": "file", "utd": "org.openxmlformats.presentationml.presentation", "maxFileSupported": 20 },
+              { "scheme": "content", "utd": "org.openxmlformats.presentationml.presentation", "maxFileSupported": 20 },
+              { "scheme": "file", "utd": "general.video", "maxFileSupported": 10 },
+              { "scheme": "content", "utd": "general.video", "maxFileSupported": 10 },
+              { "scheme": "file", "utd": "general.audio", "maxFileSupported": 10 },
+              { "scheme": "content", "utd": "general.audio", "maxFileSupported": 10 },
+              { "scheme": "file", "utd": "general.file", "maxFileSupported": 50 },
+              { "scheme": "content", "utd": "general.file", "maxFileSupported": 50 },
+              { "scheme": "file", "utd": "general.object", "maxFileSupported": 50 },
+              { "scheme": "content", "utd": "general.object", "maxFileSupported": 50 }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

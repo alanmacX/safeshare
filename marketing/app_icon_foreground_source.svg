@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="arrow" x1="0" y1="0" x2="0.8" y2="1">
+      <stop offset="0" stop-color="#29C9A4"/>
+      <stop offset="1" stop-color="#00866E"/>
+    </linearGradient>
+    <linearGradient id="shield" x1="0.25" y1="0" x2="0.75" y2="1">
+      <stop offset="0" stop-color="#20B99A"/>
+      <stop offset="1" stop-color="#007A66"/>
+    </linearGradient>
+    <linearGradient id="shieldInset" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#EDF9F6"/>
+    </linearGradient>
+  </defs>
+
+  <!-- A broad, filter-free silhouette stays crisp at launcher sizes. -->
+  <path d="M226 450C256 278 406 211 604 218H730"
+        fill="none" stroke="url(#arrow)" stroke-width="88" stroke-linecap="round"/>
+  <path d="M666 126L842 260L666 394"
+        fill="none" stroke="url(#arrow)" stroke-width="88"
+        stroke-linecap="round" stroke-linejoin="round"/>
+
+  <path d="M390 350L662 452V628C662 766 571 861 390 934C209 861 118 766 118 628V452L390 350Z"
+        fill="url(#shield)" stroke="#006453" stroke-width="18" stroke-linejoin="round"/>
+  <path d="M390 416L592 492V624C592 720 530 792 390 856C250 792 188 720 188 624V492L390 416Z"
+        fill="url(#shieldInset)" stroke="#B8E2D8" stroke-width="8" stroke-linejoin="round"/>
+  <path d="M254 620L347 708L525 518"
+        fill="none" stroke="#008D74" stroke-width="62"
+        stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M154 474L390 386L626 474"
+        fill="none" stroke="#71DDC5" stroke-width="12" stroke-linecap="round" opacity="0.75"/>
+</svg>

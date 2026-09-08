@@ -1,0 +1,9 @@
+{
+  "modelVersion": "6.0.0",
+  "description": "Local-first privacy scanner and safe sharing tool for HarmonyOS NEXT.",
+  "dependencies": {},
+  "devDependencies": {
+    "@ohos/hypium": "1.0.21"
+  }
+}
+

@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>净享 SafeShare 宣传图</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { margin: 0; width: 1080px; height: 1920px; overflow: hidden; }
+    body {
+      background: #fff;
+      color: #111827;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+    }
+    .canvas {
+      position: relative;
+      width: 1080px;
+      height: 1920px;
+      overflow: hidden;
+      background:
+        radial-gradient(circle at 50% 45%, rgba(44, 116, 255, .055), transparent 42%),
+        #fff;
+      isolation: isolate;
+    }
+    .eyebrow {
+      position: absolute;
+      z-index: 3;
+      top: 88px;
+      left: 72px;
+      color: #2468e5;
+      font-size: 24px;
+      font-weight: 700;
+      letter-spacing: .08em;
+    }
+    .headline {
+      position: absolute;
+      z-index: 1;
+      top: 252px;
+      left: 40px;
+      width: 1000px;
+      color: #2468e5;
+      font-size: 104px;
+      line-height: .98;
+      font-weight: 900;
+      letter-spacing: -.06em;
+      text-align: center;
+      white-space: nowrap;
+    }
+    .headline span { display: block; }
+    .device-shadow {
+      position: absolute;
+      z-index: 1;
+      left: 50%;
+      bottom: 42px;
+      width: 660px;
+      height: 110px;
+      transform: translateX(-50%);
+      border-radius: 50%;
+      background: rgba(16, 36, 76, .16);
+      filter: blur(42px);
+    }
+    .phone-crop {
+      position: absolute;
+      z-index: 2;
+      left: 50%;
+      bottom: -22px;
+      width: 684px;
+      height: 1388px;
+      transform: translateX(-50%);
+      overflow: hidden;
+      filter: drop-shadow(0 30px 34px rgba(19, 46, 96, .18));
+    }
+    .phone-crop img {
+      display: block;
+      width: 882px;
+      height: auto;
+      object-fit: none;
+      object-position: left top;
+    }
+    .footer {
+      position: absolute;
+      z-index: 3;
+      right: 54px;
+      bottom: 48px;
+      color: rgba(36, 104, 229, .76);
+      font-size: 21px;
+      font-weight: 700;
+      letter-spacing: .04em;
+      writing-mode: vertical-rl;
+    }
+    .cover-content {
+      display: none;
+      position: absolute;
+      inset: 0;
+      z-index: 4;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+      padding-bottom: 80px;
+    }
+    .cover .eyebrow,
+    .cover .headline,
+    .cover .device-shadow,
+    .cover .phone-crop,
+    .cover .footer { display: none; }
+    .cover .cover-content { display: flex; }
+    .cover-logo-wrap {
+      width: 430px;
+      height: 430px;
+      border-radius: 108px;
+      overflow: hidden;
+      background: #fff;
+      box-shadow: 0 34px 90px rgba(36, 104, 229, .16);
+    }
+    .cover-logo { width: 100%; height: 100%; display: block; }
+    .cover-name {
+      margin-top: 76px;
+      color: #101828;
+      font-size: 92px;
+      line-height: 1;
+      font-weight: 900;
+      letter-spacing: -.055em;
+    }
+    .cover-en {
+      margin-top: 22px;
+      color: #2468e5;
+      font-size: 38px;
+      font-weight: 750;
+      letter-spacing: .12em;
+    }
+    .cover-slogan {
+      margin-top: 128px;
+      color: #2468e5;
+      font-size: 58px;
+      font-weight: 800;
+      letter-spacing: -.035em;
+    }
+  </style>
+</head>
+<body>
+  <main class="canvas">
+    <div class="eyebrow">净享 SAFESHARE</div>
+    <div class="headline" id="headline"></div>
+    <div class="device-shadow"></div>
+    <div class="phone-crop"><img id="shot" alt="净享 SafeShare 应用界面"></div>
+    <div class="footer">本地处理 · 即选即用</div>
+    <section class="cover-content">
+      <div class="cover-logo-wrap"><img class="cover-logo" src="../../docs/store/app-icon-1024.svg" alt="净享 SafeShare 图标"></div>
+      <div class="cover-name">净享</div>
+      <div class="cover-en">SAFESHARE</div>
+      <div class="cover-slogan">分享之前，先净享</div>
+    </section>
+  </main>
+  <script>
+    const privacy = {
+      title: ['消除隐私元数据'],
+      image: '/var/folders/zm/kzywknm575q4x5y97tdqbm1h0000gn/T/codex-clipboard-0923f9e3-d723-4914-a210-42b79f67bd19.png'
+    };
+    const watermark = {
+      title: ['生成用途水印'],
+      image: '/var/folders/zm/kzywknm575q4x5y97tdqbm1h0000gn/T/TemporaryItems/NSIRD_screencaptureui_oQo2pH/Screenshot 2026-09-04 at 02.40.04.png'
+    };
+    const slide = new URLSearchParams(location.search).get('slide');
+    if (slide === 'cover') document.querySelector('.canvas').classList.add('cover');
+    const data = slide === 'watermark' ? watermark : privacy;
+    document.querySelector('#headline').innerHTML = data.title.map(line => `<span>${line}</span>`).join('');
+    document.querySelector('#shot').src = data.image;
+  </script>
+</body>
+</html>

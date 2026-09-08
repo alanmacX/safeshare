@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>净享 SafeShare 平板宣传图</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { margin: 0; width: 1920px; height: 1280px; overflow: hidden; }
+    body { color: #111827; font-family: system-ui,-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif; }
+    .canvas { position:relative; width:1920px; height:1280px; overflow:hidden; isolation:isolate;
+      background:radial-gradient(circle at 70% 58%,rgba(0,130,103,.065),transparent 43%),#fff; }
+    .eyebrow { position:absolute; z-index:5; left:106px; top:70px; color:#087f68; font-size:23px; font-weight:800; letter-spacing:.09em; }
+    .headline { position:absolute; z-index:1; left:104px; top:154px; width:1080px; color:#087f68; font-size:92px; line-height:1; font-weight:900; letter-spacing:-.055em; white-space:nowrap; }
+    .tablet-shadow { position:absolute; z-index:1; left:50%; bottom:-8px; width:1340px; height:82px; transform:translateX(-50%); border-radius:50%; background:rgba(4,68,55,.16); filter:blur(38px); }
+    .tablet-crop { position:absolute; z-index:2; left:50%; top:220px; width:1650px; height:1060px; transform:translateX(-50%); overflow:hidden; filter:drop-shadow(0 28px 34px rgba(13,48,41,.18)); }
+    .tablet-crop img,.cover-tablet img { display:block; width:1828px; height:auto; object-position:left top; }
+    .cover-content { display:none; position:absolute; inset:0; }
+    .cover .eyebrow,.cover .headline,.cover .tablet-shadow,.cover>.tablet-crop { display:none; }
+    .cover .cover-content { display:block; }
+    .cover-brand { position:absolute; z-index:7; left:120px; top:94px; width:640px; }
+    .cover-logo { width:168px; height:168px; border-radius:38px; box-shadow:0 24px 60px rgba(0,125,101,.17); }
+    .cover-name { margin-top:30px; color:#101828; font-size:67px; line-height:1; font-weight:900; letter-spacing:-.055em; white-space:nowrap; }
+    .cover-name span { margin-left:14px; color:#087f68; font-size:.64em; font-weight:800; }
+    .cover-slogan { margin-top:24px; color:#087f68; font-size:35px; font-weight:800; letter-spacing:-.03em; }
+    .cover-stage { position:absolute; z-index:2; inset:0; }
+    .cover-tablet { position:absolute; width:1650px; height:1060px; overflow:hidden; filter:drop-shadow(0 28px 38px rgba(13,48,41,.18)); transform-origin:center; }
+    .cover-tablet.back { right:-510px; top:-120px; transform:rotate(4deg) scale(.76); opacity:.88; }
+    .cover-tablet.front { right:-190px; bottom:-290px; transform:rotate(-2.5deg) scale(.83); }
+    .cover-wash { position:absolute; z-index:5; inset:0; background:linear-gradient(90deg,#fff 0%,rgba(255,255,255,.98) 31%,rgba(255,255,255,.55) 49%,rgba(255,255,255,0) 69%); pointer-events:none; }
+  </style>
+</head>
+<body>
+  <main class="canvas">
+    <div class="eyebrow">净享 SAFESHARE</div>
+    <div class="headline" id="headline"></div>
+    <div class="tablet-shadow"></div>
+    <div class="tablet-crop"><img id="shot" alt="净享 SafeShare 平板功能界面"></div>
+    <section class="cover-content">
+      <div class="cover-stage">
+        <div class="cover-tablet back"><img src="/var/folders/zm/kzywknm575q4x5y97tdqbm1h0000gn/T/TemporaryItems/NSIRD_screencaptureui_xk9M5E/Screenshot 2026-09-08 at 03.15.50.png" alt="文件检查主页"></div>
+        <div class="cover-tablet front"><img src="/var/folders/zm/kzywknm575q4x5y97tdqbm1h0000gn/T/TemporaryItems/NSIRD_screencaptureui_2mgBqT/Screenshot 2026-09-08 at 03.15.45.png" alt="净享主页"></div>
+      </div>
+      <div class="cover-wash"></div>
+      <div class="cover-brand">
+        <img class="cover-logo" src="../../docs/store/app-icon-1024.png" alt="净享 SafeShare 图标">
+        <div class="cover-name">净享<span>SafeShare</span></div>
+        <div class="cover-slogan">分享之前，先净享</div>
+      </div>
+    </section>
+  </main>
+  <script>
+    const slides={
+      photo:{title:'消除照片隐私数据',image:'/var/folders/zm/kzywknm575q4x5y97tdqbm1h0000gn/T/TemporaryItems/NSIRD_screencaptureui_uP1VSx/Screenshot 2026-09-08 at 03.15.38.png'},
+      file:{title:'消除文件隐私数据',image:'/var/folders/zm/kzywknm575q4x5y97tdqbm1h0000gn/T/TemporaryItems/NSIRD_screencaptureui_D3xvby/Screenshot 2026-09-08 at 03.16.23.png'}
+    };
+    const slide=new URLSearchParams(location.search).get('slide')||'photo';
+    if(slide==='cover')document.querySelector('.canvas').classList.add('cover');
+    const data=slides[slide]||slides.photo;
+    document.querySelector('#headline').textContent=data.title;
+    document.querySelector('#shot').src=data.image;
+  </script>
+</body>
+</html>

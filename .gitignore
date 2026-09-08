@@ -1,0 +1,19 @@
+.idea/
+.DS_Store
+.appanalyzer/
+.hvigor/
+**/build/
+**/.cxx/
+**/.preview/
+node_modules/
+oh_modules/
+local.properties
+*.hap
+*.app
+
+# DevEco writes local certificate paths and encrypted signing passwords here.
+build-profile.json5
+!build-profile.example.json5
+*.p12
+*.p7b
+*.cer
