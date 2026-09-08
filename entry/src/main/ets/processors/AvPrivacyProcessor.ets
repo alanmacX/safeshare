@@ -11,8 +11,8 @@ import { NativeMediaRemuxer, NativeRemuxResult } from './NativeMediaRemuxer';
 
 /**
  * Privacy checker for audio/video containers. Video cleanup uses a native
- * demux/remux pipeline and then verifies the generated sandbox copy; audio is
- * intentionally scan-only until its output policy is separately validated.
+ * demux/remux pipeline and then verifies the generated sandbox copy. M4A uses
+ * the same encoded-track copy path; other audio containers stay scan-only.
  */
 export class AvPrivacyTool {
   private tempFiles: TempFileManager;
@@ -137,7 +137,7 @@ export class AvPrivacyTool {
       }
     }
     const result: PrivacyScanResult = this.result(uri, findings, warnings,
-      videoContent || detectedMimeType.startsWith('video/'));
+      videoContent || detectedMimeType.startsWith('video/'), detectedMimeType === 'audio/mp4');
     result.mimeType = detectedMimeType;
     result.pixelWidth = pixelWidth;
     result.pixelHeight = pixelHeight;
@@ -170,12 +170,15 @@ export class AvPrivacyTool {
       if (inputLength <= 0) throw new Error('EMPTY_MEDIA');
       let sourceName: string = uri;
       try { sourceName = input.name; } catch (_) {}
-      outputPath = this.tempFiles.createOutputPath(sourceName, 'mp4');
+      const containerMimeType: string = IsoBmffMetadataReader.containerMimeType(input.fd, inputLength);
+      const audioOnly: boolean = this.isM4a(sourceName) || this.isM4a(uri) ||
+        containerMimeType === 'audio/mp4';
+      outputPath = this.tempFiles.createOutputPath(sourceName, audioOnly ? 'm4a' : 'mp4');
       output = await fileIo.open(outputPath,
         fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
       const nativeResult: NativeRemuxResult = await NativeMediaRemuxer.remuxToMp4(input, inputLength, output);
-      if (nativeResult.trackCount <= 0 || nativeResult.videoTrackCount <= 0 ||
-        nativeResult.sampleCount <= 0) {
+      if (nativeResult.trackCount <= 0 || nativeResult.sampleCount <= 0 ||
+        (audioOnly ? nativeResult.videoTrackCount !== 0 : nativeResult.videoTrackCount <= 0)) {
         throw new Error('EMPTY_REMUX');
       }
       fileIo.closeSync(output);
@@ -188,7 +191,8 @@ export class AvPrivacyTool {
         throw new Error('METADATA_REMAINS');
       }
       const sanitized = new SanitizedFile(outputPath, outputUri, verification,
-        'general.mpeg-4', 'video/mp4');
+        audioOnly ? 'general.mpeg-4-audio' : 'general.mpeg-4',
+        audioOnly ? 'audio/mp4' : 'video/mp4');
       sanitized.fileKind = 'AUDIO_VIDEO';
       sanitized.byteSize = fileIo.statSync(outputPath).size;
       return sanitized;
@@ -197,7 +201,8 @@ export class AvPrivacyTool {
       const stage: string = (error as Error).message;
       // Only fixed native stage codes are propagated; never include a URI,
       // file name, or detected metadata value.
-      throw new Error(stage.startsWith('VIDEO_') ? stage : `VIDEO_${stage}`);
+      const prefix: string = this.isM4a(uri) ? 'AUDIO_' : 'VIDEO_';
+      throw new Error(stage.startsWith(prefix) ? stage : `${prefix}${stage}`);
     } finally {
       try { if (output !== undefined) fileIo.closeSync(output); } catch (_) {}
       try { if (input !== undefined) fileIo.closeSync(input); } catch (_) {}
@@ -327,19 +332,26 @@ export class AvPrivacyTool {
     findings.push(finding);
   }
 
-  private result(uri: string, findings: PrivacyFinding[], warnings: string[], isVideo: boolean = false): PrivacyScanResult {
+  private result(uri: string, findings: PrivacyFinding[], warnings: string[], isVideo: boolean = false,
+    isM4aContent: boolean = false): PrivacyScanResult {
     const result: PrivacyScanResult = new PrivacyScanResult(uri, findings);
     result.capabilityWarnings = warnings;
     result.scanFailed = findings.length === 0 && warnings.length > 0;
-    // Video can now produce a metadata-clean remuxed copy. Audio remains a
-    // read-only inspector until each output container has been validated.
-    result.readOnlyTool = !isVideo;
+    // ISO-BMFF audio (M4A) can use the same encoded-track copy path. Other
+    // audio containers require their own tag/container writers.
+    result.readOnlyTool = !isVideo && !isM4aContent && !this.isM4a(uri);
     return result;
   }
 
   private isMov(uri: string): boolean {
     const normalized: string = uri.toLowerCase();
     return normalized.indexOf('.mov') >= 0 || normalized.indexOf('video/quicktime') >= 0;
+  }
+
+  private isM4a(uri: string): boolean {
+    const normalized: string = uri.toLowerCase();
+    return normalized.indexOf('.m4a') >= 0 || normalized.indexOf('audio/mp4') >= 0 ||
+      normalized.indexOf('mpeg-4-audio') >= 0;
   }
 
   private pushIfPresent(findings: PrivacyFinding[], subtype: string, risk: RiskLevel,

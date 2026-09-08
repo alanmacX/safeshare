@@ -17,7 +17,7 @@ export enum FileKind {
 const PDF_EXTENSIONS: string[] = ['pdf'];
 // Macro-enabled and template OOXML variants share the exact same ZIP package
 // layout, so the sanitizer can process them identically.
-const WORD_EXTENSIONS: string[] = ['docx', 'docm', 'dotx'];
+const WORD_EXTENSIONS: string[] = ['docx', 'docm', 'dotx', 'dotm'];
 const EXCEL_EXTENSIONS: string[] = ['xlsx', 'xlsm', 'xltx', 'xltm'];
 const POWERPOINT_EXTENSIONS: string[] = ['pptx', 'pptm', 'ppsx', 'ppsm', 'potx', 'potm'];
 // Legacy binary Office formats are recognized so the UI can name them and
@@ -137,7 +137,34 @@ export class FileTypeRouter {
     if (extension === 'flac') return 'audio/flac';
     if (extension === 'ogg') return 'audio/ogg';
     if (extension === 'amr') return 'audio/amr';
+    if (extension === 'docm') return 'application/vnd.ms-word.document.macroEnabled.12';
+    if (extension === 'dotx') return 'application/vnd.openxmlformats-officedocument.wordprocessingml.template';
+    if (extension === 'dotm') return 'application/vnd.ms-word.template.macroEnabled.12';
+    if (extension === 'xlsm') return 'application/vnd.ms-excel.sheet.macroEnabled.12';
+    if (extension === 'xltx') return 'application/vnd.openxmlformats-officedocument.spreadsheetml.template';
+    if (extension === 'xltm') return 'application/vnd.ms-excel.template.macroEnabled.12';
+    if (extension === 'pptm') return 'application/vnd.ms-powerpoint.presentation.macroEnabled.12';
+    if (extension === 'ppsx') return 'application/vnd.openxmlformats-officedocument.presentationml.slideshow';
+    if (extension === 'ppsm') return 'application/vnd.ms-powerpoint.slideshow.macroEnabled.12';
+    if (extension === 'potx') return 'application/vnd.openxmlformats-officedocument.presentationml.template';
+    if (extension === 'potm') return 'application/vnd.ms-powerpoint.template.macroEnabled.12';
     return FileTypeRouter.mimeTypeFor(detected);
+  }
+
+  static utdForUri(uri: string, kind: FileKind = FileKind.UNKNOWN): string {
+    const extension: string = FileTypeRouter.extensionOf(uri);
+    if (extension === 'docm') return 'org.openxmlformats.wordprocessingml.document.macroenabled';
+    if (extension === 'dotx') return 'org.openxmlformats.wordprocessingml.template';
+    if (extension === 'dotm') return 'org.openxmlformats.wordprocessingml.template.macroenabled';
+    if (extension === 'xlsm') return 'org.openxmlformats.spreadsheetml.sheet.macroenabled';
+    if (extension === 'xltx') return 'org.openxmlformats.spreadsheetml.template';
+    if (extension === 'xltm') return 'org.openxmlformats.spreadsheetml.template.macroenabled';
+    if (extension === 'pptm') return 'org.openxmlformats.presentationml.presentation.macroenabled';
+    if (extension === 'ppsx') return 'org.openxmlformats.presentationml.slideshow';
+    if (extension === 'ppsm') return 'org.openxmlformats.presentationml.slideshow.macroenabled';
+    if (extension === 'potx') return 'org.openxmlformats.presentationml.template';
+    if (extension === 'potm') return 'org.openxmlformats.presentationml.template.macroenabled';
+    return FileTypeRouter.utdFor(kind === FileKind.UNKNOWN ? FileTypeRouter.detect(uri) : kind);
   }
 
   static isVideoUri(uri: string): boolean {

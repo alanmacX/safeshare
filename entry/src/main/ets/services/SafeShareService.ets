@@ -204,7 +204,7 @@ export class SafeShareService {
       const stage: string = (error as Error).message;
       // Stage-coded failures keep their specific message so the UI can show
       // the honest cause (video pipeline codes, PDF revision failures).
-      if (stage.startsWith('VIDEO_') || stage.startsWith('PDF_COPY_FAILED:') ||
+      if (stage.startsWith('VIDEO_') || stage.startsWith('AUDIO_') || stage.startsWith('PDF_COPY_FAILED:') ||
         stage === 'LEGACY_OFFICE_FORMAT') throw error as Error;
       throw new Error('Unable to create all verified sanitized copies.');
     }
@@ -241,7 +241,7 @@ export class SafeShareService {
   private documentOutput(copyPath: string, verification: PrivacyScanResult,
     kind: FileKind): SanitizedFile {
     const file: SanitizedFile = new SanitizedFile(copyPath, fileUri.getUriFromPath(copyPath),
-      verification, FileTypeRouter.utdFor(kind), FileTypeRouter.mimeTypeFor(kind));
+      verification, FileTypeRouter.utdForUri(copyPath, kind), FileTypeRouter.mimeTypeForUri(copyPath, kind));
     file.fileKind = kind;
     try {
       file.byteSize = fileIo.statSync(copyPath).size;

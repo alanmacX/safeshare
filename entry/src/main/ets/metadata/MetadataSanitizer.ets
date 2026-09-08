@@ -60,9 +60,31 @@ export class MetadataSanitizer {
       let sourceName: string = uri;
       try { sourceName = sourceFile.name; } catch (_) {}
       outputPath = manager.createOutputPath(sourceName, this.extensionForMimeType(outputMimeType));
+      const hasVisualEdit: boolean = actions.length > 0 || policy.purposeWatermark.trim().length > 0 ||
+        policy.imageWatermarkUri.length > 0;
+      // Metadata-only cleaning must not decode and re-encode the image. Besides
+      // avoiding generational JPEG/HEIF loss, an exact container copy keeps
+      // HDR gain maps and other auxiliary images owned by the system camera.
+      if (!hasVisualEdit && this.supportsInPlaceMetadata(sourceInfo.mimeType)) {
+        await this.copySourceToPath(sourceFile, outputPath);
+        await this.applyMetadataPolicyInPlace(outputPath, policy, preserved);
+        const outputUri: string = fileUri.getUriFromPath(outputPath);
+        const verification = await this.scanner.scan(outputUri);
+        if (this.hasUnexpectedMetadata(verification.findings, policy) ||
+          !this.hasRequestedReplacements(verification.findings, policy)) {
+          throw new Error('Sanitized copy metadata does not match the selected policy.');
+        }
+        await this.verifyPreservedMetadata(outputPath, preserved);
+        const lossless = new SanitizedFile(outputPath, outputUri, verification,
+          this.utdForMimeType(sourceInfo.mimeType), sourceInfo.mimeType);
+        lossless.pixelWidth = sourceInfo.size.width;
+        lossless.pixelHeight = sourceInfo.size.height;
+        lossless.byteSize = fileIo.statSync(outputPath).size;
+        flowLog('img_metadata_copy_done');
+        return lossless;
+      }
       pixelMap = await source.createPixelMap({
-        editable: actions.length > 0 || policy.purposeWatermark.trim().length > 0 ||
-          policy.imageWatermarkUri.length > 0,
+        editable: hasVisualEdit,
         desiredPixelFormat: image.PixelMapFormat.RGBA_8888
       });
       flowLog('img_decode_done');
@@ -137,6 +159,107 @@ export class MetadataSanitizer {
           fileIo.closeSync(sourceFile);
         } catch (_) {
         }
+      }
+    }
+  }
+
+  private supportsInPlaceMetadata(mimeType: string): boolean {
+    return mimeType === 'image/jpeg' || mimeType === 'image/png' ||
+      mimeType === 'image/heif' || mimeType === 'image/heic' || mimeType === 'image/webp';
+  }
+
+  private async copySourceToPath(source: fileIo.File, outputPath: string): Promise<void> {
+    let target: fileIo.File | undefined = undefined;
+    try {
+      fileIo.lseek(source.fd, 0, fileIo.WhenceType.SEEK_SET);
+      target = await fileIo.open(outputPath,
+        fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
+      await fileIo.copyFile(source.fd, target.fd);
+    } finally {
+      if (target !== undefined) {
+        try { fileIo.closeSync(target); } catch (_) {}
+      }
+    }
+  }
+
+  private allManagedPropertyKeys(): image.PropertyKey[] {
+    return [
+      image.PropertyKey.GPS_LATITUDE, image.PropertyKey.GPS_LATITUDE_REF,
+      image.PropertyKey.GPS_LONGITUDE, image.PropertyKey.GPS_LONGITUDE_REF,
+      image.PropertyKey.GPS_DATE_STAMP, image.PropertyKey.GPS_ALTITUDE,
+      image.PropertyKey.GPS_PROCESSING_METHOD, image.PropertyKey.GPS_AREA_INFORMATION,
+      image.PropertyKey.DATE_TIME_ORIGINAL, image.PropertyKey.DATE_TIME,
+      image.PropertyKey.DATE_TIME_DIGITIZED, image.PropertyKey.MODEL, image.PropertyKey.MAKE,
+      image.PropertyKey.SOFTWARE, image.PropertyKey.ARTIST, image.PropertyKey.COPYRIGHT,
+      image.PropertyKey.USER_COMMENT, image.PropertyKey.IMAGE_DESCRIPTION,
+      image.PropertyKey.CAMERA_OWNER_NAME, image.PropertyKey.BODY_SERIAL_NUMBER,
+      image.PropertyKey.LENS_SERIAL_NUMBER, image.PropertyKey.LENS_MODEL,
+      image.PropertyKey.F_NUMBER, image.PropertyKey.EXPOSURE_TIME,
+      image.PropertyKey.ISO_SPEED_RATINGS, image.PropertyKey.FOCAL_LENGTH
+    ];
+  }
+
+  private async applyMetadataPolicyInPlace(path: string, policy: MetadataPolicy,
+    preserved: MetadataValue[]): Promise<void> {
+    let file: fileIo.File | undefined = undefined;
+    let outputSource: image.ImageSource | undefined = undefined;
+    try {
+      file = await fileIo.open(path, fileIo.OpenMode.READ_WRITE);
+      outputSource = image.createImageSource(file.fd);
+      const records: Record<string, string | null> = {};
+      const keys: image.PropertyKey[] = this.allManagedPropertyKeys();
+      // Do not submit unsupported keys as one atomic batch: PNG/WebP/HEIF
+      // expose different writable property sets. Only remove properties the
+      // decoder actually reported for this concrete file.
+      for (let index: number = 0; index < keys.length; index++) {
+        try {
+          const current: string = await outputSource.getImageProperty(keys[index]);
+          if (current.length > 0 && current !== 'undefined' && current !== 'Unknown') {
+            records[keys[index]] = null;
+          }
+        } catch (_) {}
+      }
+      for (let index: number = 0; index < preserved.length; index++) {
+        records[preserved[index].key] = preserved[index].value;
+      }
+      if (Object.keys(records).length > 0) {
+        await outputSource.modifyImagePropertiesEnhanced(records);
+      }
+    } finally {
+      if (outputSource !== undefined) outputSource.release();
+      if (file !== undefined) {
+        try { fileIo.closeSync(file); } catch (_) {}
+      }
+    }
+  }
+
+  private async verifyPreservedMetadata(path: string, preserved: MetadataValue[]): Promise<void> {
+    if (preserved.length === 0) return;
+    let file: fileIo.File | undefined = undefined;
+    let outputSource: image.ImageSource | undefined = undefined;
+    try {
+      file = await fileIo.open(path, fileIo.OpenMode.READ_ONLY);
+      outputSource = image.createImageSource(file.fd);
+      for (let index: number = 0; index < preserved.length; index++) {
+        const actual: string = await outputSource.getImageProperty(preserved[index].key);
+        if (actual.length === 0 || actual === 'undefined' || actual === 'Unknown') {
+          throw new Error('Requested metadata was not preserved.');
+        }
+        // A successful write call is not enough: formats may normalize a
+        // value or silently keep the old one. Require exact read-back for all
+        // non-coordinate properties; GPS replacement has its dedicated
+        // numeric verification because EXIF converts decimals to DMS.
+        const key: image.PropertyKey = preserved[index].key;
+        const coordinate: boolean = key === image.PropertyKey.GPS_LATITUDE ||
+          key === image.PropertyKey.GPS_LONGITUDE;
+        if (!coordinate && actual !== preserved[index].value) {
+          throw new Error('Requested metadata changed during preservation.');
+        }
+      }
+    } finally {
+      if (outputSource !== undefined) outputSource.release();
+      if (file !== undefined) {
+        try { fileIo.closeSync(file); } catch (_) {}
       }
     }
   }
@@ -389,7 +512,11 @@ export class MetadataSanitizer {
     if (mimeType === 'image/png') {
       return 'general.png';
     }
-    return mimeType === 'image/jpeg' ? 'general.jpeg' : 'general.image';
+    if (mimeType === 'image/jpeg') return 'general.jpeg';
+    if (mimeType === 'image/heif') return 'general.heif';
+    if (mimeType === 'image/heic') return 'general.heic';
+    if (mimeType === 'image/webp') return 'org.webmproject.webp';
+    return 'general.image';
   }
 
   private async redactSensitiveRegions(pixelMap: image.PixelMap, actions: RedactionAction[]): Promise<void> {
