@@ -5,7 +5,7 @@ import { TabSegmentButtonV2, SegmentButtonV2Items } from '@ohos.arkui.advanced.S
 import { hdsMaterial, HdsNavigation, HdsNavDestination, ScrollEffectType,
   BlurStrategy, HdsListItemCard, SuffixArrow, SuffixSwitch, HdsTabs, HdsTabsController } from '@kit.UIDesignKit';
 import { image } from '@kit.ImageKit';
-import { fileIo, picker } from '@kit.CoreFileKit';
+import { fileIo, fileUri, picker } from '@kit.CoreFileKit';
 import { unifiedDataChannel } from '@kit.ArkData';
 import { photoAccessHelper } from '@kit.MediaLibraryKit';
 import { FindingCategory, PrivacyFinding, PrivacyScanResult, RedactionAction, RedactionStyle, RiskLevel,
@@ -1463,6 +1463,10 @@ struct Index {
     let sourceFile: fileIo.File | undefined = undefined;
     let source: image.ImageSource | undefined = undefined;
     let pixelMap: image.PixelMap | undefined = undefined;
+    let regionPixelMap: image.PixelMap | undefined = undefined;
+    let target: fileIo.File | undefined = undefined;
+    let packer: image.ImagePacker | undefined = undefined;
+    let path: string = '';
     try {
       sourceFile = await fileIo.open(uri, fileIo.OpenMode.READ_ONLY);
       source = image.createImageSource(sourceFile.fd);
@@ -1510,29 +1514,45 @@ struct Index {
       // Off-main-thread: same taskpool routine as the final export.
       const processed: ArrayBuffer = await runRedaction(buffer, stride,
         width, height, styleNumber);
-      const regionPixelMap: image.PixelMap = await image.createPixelMap(processed,
+      regionPixelMap = await image.createPixelMap(processed,
         { size: { width: width, height: height }, pixelFormat: image.PixelMapFormat.RGBA_8888 });
       const context: common.UIAbilityContext = this.getUIContext().getHostContext() as common.UIAbilityContext;
-      const path: string = `${context.cacheDir}/safeshare-prev-${Date.now()}-${finding.id.replace(/[^a-z0-9]/gi, '')}.png`;
-      const target: fileIo.File = await fileIo.open(path,
+      path = `${context.cacheDir}/safeshare-prev-${Date.now()}-${finding.id.replace(/[^a-z0-9]/gi, '')}.png`;
+      target = await fileIo.open(path,
         fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
-      const packer: image.ImagePacker = image.createImagePacker();
+      packer = image.createImagePacker();
       await packer.packToFile(regionPixelMap, target.fd, { format: 'image/png', quality: 100 });
       packer.release();
+      packer = undefined;
       regionPixelMap.release();
-      await fileIo.closeSync(target);
+      regionPixelMap = undefined;
+      fileIo.closeSync(target);
+      target = undefined;
       if (generation !== this.previewGeneration) {
         // The preview context moved on while this job was decoding; drop the
         // output so no orphan file survives and no stale entry repopulates.
         fileIo.unlinkSync(path);
         return;
       }
-      this.redactedPreviewUris.set(key, `file://${path}`);
+      this.redactedPreviewUris.set(key, fileUri.getUriFromPath(path));
+      path = '';
       this.findings = this.findings.slice();
       this.refreshDerivedFindings();
     } catch (_) {
       // Preview falls back to a plain dark fill if pixel extraction fails.
     } finally {
+      if (target !== undefined) {
+        try { fileIo.closeSync(target); } catch (_) {}
+      }
+      if (packer !== undefined) {
+        try { packer.release(); } catch (_) {}
+      }
+      if (regionPixelMap !== undefined) {
+        try { regionPixelMap.release(); } catch (_) {}
+      }
+      if (path.length > 0) {
+        try { await fileIo.unlink(path); } catch (_) {}
+      }
       if (pixelMap !== undefined) {
         try { pixelMap.release(); } catch (_) {}
       }
@@ -2146,6 +2166,21 @@ struct Index {
     return Math.max(top, Math.min(value, bottom));
   }
 
+  /** Matches the padded pixel rectangle used by the final sanitizer. */
+  private displayedRedactionRegion(finding: PrivacyFinding): SensitiveRegion {
+    const region: SensitiveRegion = finding.region as SensitiveRegion;
+    const paddingRatio: number = finding.category === FindingCategory.QR ? 0.18 :
+      (finding.category === FindingCategory.FACE ? 0.12 : 0.08);
+    const padding: number = Math.max(8, Math.round(Math.max(region.width, region.height) * paddingRatio));
+    const left: number = Math.max(0, Math.floor(region.left) - padding);
+    const top: number = Math.max(0, Math.floor(region.top) - padding);
+    const right: number = Math.min(this.previewPixelWidthState,
+      Math.ceil(region.left + region.width) + padding);
+    const bottom: number = Math.min(this.previewPixelHeightState,
+      Math.ceil(region.top + region.height) + padding);
+    return new SensitiveRegion(left, top, Math.max(0, right - left), Math.max(0, bottom - top));
+  }
+
   @Builder
   FindingOverlay(finding: PrivacyFinding) {
     if (finding.region !== undefined) {
@@ -2158,14 +2193,14 @@ struct Index {
             .interpolation(ImageInterpolation.None)
         }
       }
-        .width(Math.max(8, finding.region.width * this.previewScale()))
-        .height(Math.max(8, finding.region.height * this.previewScale()))
+        .width(Math.max(8, this.displayedRedactionRegion(finding).width * this.previewScale()))
+        .height(Math.max(8, this.displayedRedactionRegion(finding).height * this.previewScale()))
         .border({ width: finding.selectedForRemoval ? 3 : 2,
           color: finding.selectedForRemoval ? $r('app.color.accent') : $r('app.color.warning') })
         .borderRadius(5)
         .backgroundColor(Color.Transparent)
-        .position({ x: this.previewOffsetX() + finding.region.left * this.previewScale(),
-          y: this.previewOffsetY() + finding.region.top * this.previewScale() })
+        .position({ x: this.previewOffsetX() + this.displayedRedactionRegion(finding).left * this.previewScale(),
+          y: this.previewOffsetY() + this.displayedRedactionRegion(finding).top * this.previewScale() })
         .clip(true)
         .accessibilityRole(AccessibilityRoleType.BUTTON)
         .accessibilityText(finding.selectedForRemoval ?
@@ -3375,7 +3410,7 @@ struct Index {
           if (this.status === PageStatus.RESULT && this.featureMode === FeatureMode.PRIVACY) {
             ForEach(this.visibleOverlayFindings(), (finding: PrivacyFinding) => {
               this.FindingOverlay(finding)
-            }, (finding: PrivacyFinding) => `overlay-${finding.id}`)
+            }, (finding: PrivacyFinding) => `overlay-${finding.id}-${finding.selectedForRemoval ? 'redact' : 'keep'}`)
           }
         } else if (this.hasVideoPreview()) {
           Image(this.mediaPreviewPixelMap)
@@ -4137,4 +4172,3 @@ struct Index {
 
   }
 }
-

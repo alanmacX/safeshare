@@ -15,10 +15,9 @@ export class FileSignatureRouter {
     let source: fileIo.File | undefined = undefined;
     try {
       source = await fileIo.open(uri, fileIo.OpenMode.READ_ONLY);
-      // The provider's own display name is the strongest identity signal for
-      // share URIs whose path form hides the extension (datashare://…,
-      // stripped tmp names). Extension-first keeps the ZIP sniff below as the
-      // per-file source of truth inside the OOXML families.
+      // The provider's display name is only a fallback for formats whose
+      // signature is inconclusive. Content must win when a suffix is stale or
+      // misleading.
       const nameKind: FileKind = FileTypeRouter.detect(source.name ?? '', '');
       const buffer: ArrayBuffer = new ArrayBuffer(FileSignatureRouter.HEADER_BYTES);
       const count: number = fileIo.readSync(source.fd, buffer,
@@ -31,10 +30,8 @@ export class FileSignatureRouter {
       if (FileSignatureRouter.isZip(header)) {
         return await FileSignatureRouter.detectOoxml(source);
       }
-      if (nameKind !== FileKind.UNKNOWN) {
-        return nameKind;
-      }
-      return headerKind;
+      if (headerKind !== FileKind.UNKNOWN) return headerKind;
+      return nameKind;
     } catch (_) {
       return FileKind.UNKNOWN;
     } finally {

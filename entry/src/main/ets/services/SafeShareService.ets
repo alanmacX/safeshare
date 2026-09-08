@@ -78,14 +78,9 @@ export class SafeShareService {
   }
 
   async resolveKind(uri: string, utd: string = ''): Promise<FileKind> {
-    // Signal order: extension, then per-file content signature (which also
-    // reads the provider's display name), then the possibly batch-wide UTD.
-    // Signature-first let one mislabeled probe outrank a truthful filename in
-    // mixed share batches, so extension leads.
-    const extensionKind: FileKind = FileTypeRouter.detect(uri, '');
-    if (extensionKind !== FileKind.UNKNOWN) {
-      return extensionKind;
-    }
+    // URI path fragments are provider implementation details and may contain
+    // a misleading suffix. Prefer the opened file's signature/display name;
+    // use the supplied per-record UTD and URI only when probing is unavailable.
     const signatureKind: FileKind = await FileSignatureRouter.detect(uri);
     if (signatureKind !== FileKind.UNKNOWN) {
       return signatureKind;

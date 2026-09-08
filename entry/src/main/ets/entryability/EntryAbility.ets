@@ -90,9 +90,10 @@ export abstract class ShareEntryAbility extends UIAbility {
         AppStorage.set('shareReceiveError', '分享内容中没有可处理的文件，支持图片、PDF、Word、Excel、PPT 和音视频。');
         AppStorage.set('shareArrival', Date.now());
       }
-    } catch (error) {
-      // Never log the received URI or file contents.
-      hilog.error(0x8801, 'SafeShareFlow', `receive_failed=${(error as Error).message?.slice(0, 60) ?? '?'}`);
+    } catch (_) {
+      // Provider/Share Kit exception text can contain a URI or file name.
+      // Log only a fixed stage marker so diagnostics never expose user data.
+      hilog.error(0x8801, 'SafeShareFlow', 'receive_share_failed');
       AppStorage.set('sharedUrisPayload', '');
       AppStorage.set('sharedUtdsPayload', '');
       AppStorage.set('shareReceiveError', '未能读取分享内容，请返回图库后重试。');
