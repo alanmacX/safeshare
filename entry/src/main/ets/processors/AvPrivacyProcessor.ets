@@ -233,7 +233,11 @@ export class AvPrivacyTool {
       fileIo.closeSync(source);
       source = undefined;
       const outputUri: string = fileUri.getUriFromPath(outputPath);
-      const verification: PrivacyScanResult = await this.scan(outputUri);
+      // MovingPhoto uses a deterministic container-only contract. The same
+      // ISO-BMFF parser classifies, sanitizes and verifies metadata, so
+      // platform AVMetadataExtractor aliases cannot create false findings or
+      // tempt cleanup code to remove functional motion anchors.
+      const verification: PrivacyScanResult = await this.scanMovingPhotoComponent(outputUri);
       if (verification.scanFailed || verification.findings.length > 0) {
         throw new Error('MOVING_PHOTO_METADATA_REMAINS');
       }
@@ -249,6 +253,35 @@ export class AvPrivacyTool {
       try { if (target !== undefined) fileIo.closeSync(target); } catch (_) {}
       try { if (source !== undefined) fileIo.closeSync(source); } catch (_) {}
     }
+  }
+
+  async scanMovingPhotoComponent(uri: string): Promise<PrivacyScanResult> {
+    let source: fileIo.File | undefined = undefined;
+    const findings: PrivacyFinding[] = [];
+    const warnings: string[] = [];
+    let mimeType: string = 'video/mp4';
+    try {
+      source = await fileIo.open(uri, fileIo.OpenMode.READ_ONLY);
+      const size: number = fileIo.statSync(source.fd).size;
+      if (size <= 0 || !IsoBmffMetadataReader.isReadableContainer(source.fd, size)) {
+        const failed: PrivacyScanResult = this.result(uri, findings,
+          ['动态照片的视频容器无法验证'], true, false);
+        failed.scanFailed = true;
+        return failed;
+      }
+      mimeType = IsoBmffMetadataReader.containerMimeType(source.fd, size);
+      this.collectIsoMetadata(findings, IsoBmffMetadataReader.read(source.fd, size));
+    } catch (_) {
+      const failed: PrivacyScanResult = this.result(uri, findings,
+        ['动态照片的视频容器无法验证'], true, false);
+      failed.scanFailed = true;
+      return failed;
+    } finally {
+      try { if (source !== undefined) fileIo.closeSync(source); } catch (_) {}
+    }
+    const result: PrivacyScanResult = this.result(uri, findings, warnings, true, false);
+    result.mimeType = mimeType.length > 0 ? mimeType : 'video/mp4';
+    return result;
   }
 
   private containsVideo(metadata: media.AVMetadata, uri: string): boolean {
@@ -362,11 +395,7 @@ export class AvPrivacyTool {
   }
 
   private isMotionStructureKey(normalizedKey: string): boolean {
-    // These values link the cover to its timed frame. They are functional
-    // structure, not user privacy metadata, and clearing them breaks motion.
-    return normalizedKey.indexOf('still-image-time') >= 0 ||
-      normalizedKey.indexOf('motion-photo') >= 0 || normalizedKey.indexOf('motionphoto') >= 0 ||
-      normalizedKey.indexOf('microvideo') >= 0;
+    return IsoBmffMetadataReader.isMovingPhotoStructureKey(normalizedKey);
   }
 
   private pushCustom(findings: PrivacyFinding[], key: string, subtype: string, risk: RiskLevel,

@@ -4,9 +4,40 @@ import { ContainerMetadata, ContainerMetadataSummary } from '../main/ets/metadat
 import { JpegMetadata, JpegMetadataSummary } from '../main/ets/metadata/JpegMetadata';
 import { MediaCapabilityRegistry, SupportGrade } from '../main/ets/metadata/MediaCapabilityRegistry';
 import { FileKind } from '../main/ets/processors/FileTypeRouter';
+import { IsoBmffMetadataReader } from '../main/ets/processors/IsoBmffMetadataReader';
 
 function bytes(values: number[]): Uint8Array {
   return new Uint8Array(values);
+}
+
+function uint32(value: number): number[] {
+  return [(value >>> 24) & 0xFF, (value >>> 16) & 0xFF, (value >>> 8) & 0xFF, value & 0xFF];
+}
+
+function ascii(value: string): number[] {
+  const output: number[] = [];
+  for (let index: number = 0; index < value.length; index++) output.push(value.charCodeAt(index));
+  return output;
+}
+
+function box(type: number[], payload: number[]): number[] {
+  return uint32(payload.length + 8).concat(type, payload);
+}
+
+function textBox(type: string, payload: number[]): number[] {
+  return box(ascii(type), payload);
+}
+
+function containsAscii(value: Uint8Array, needle: string): boolean {
+  const target: number[] = ascii(needle);
+  for (let offset: number = 0; offset + target.length <= value.length; offset++) {
+    let matches: boolean = true;
+    for (let index: number = 0; index < target.length; index++) {
+      if (value[offset + index] !== target[index]) { matches = false; break; }
+    }
+    if (matches) return true;
+  }
+  return false;
 }
 
 export default function testsuite(): void {
@@ -88,6 +119,64 @@ export default function testsuite(): void {
       for (let index: number = 0; index < protectedBefore.length; index++) {
         expect(protectedAfter[index]).assertEqual(protectedBefore[index]);
       }
+    });
+
+    it('keeps MovingPhoto XMP association while clearing private XMP values', 0, (): void => {
+      const xmp: string = 'http://ns.adobe.com/xap/1.0/\u0000' +
+        '<x GCamera:MicroVideoPresentationTimestampUs="123456" ' +
+        'exif:DateTimeOriginal="2026:09:09 00:00:00"/>';
+      const payload: number[] = ascii(xmp);
+      const app1: number[] = [0xFF, 0xE1].concat([(payload.length + 2) >>> 8, (payload.length + 2) & 0xFF], payload);
+      const scan: number[] = [0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3F, 0x00,
+        0x44, 0x55, 0xFF, 0xD9];
+      const cleaned: Uint8Array = JpegMetadata.sanitize(bytes([0xFF, 0xD8].concat(app1, scan)));
+      expect(containsAscii(cleaned, 'GCamera:MicroVideoPresentationTimestampUs="123456"')).assertTrue();
+      expect(containsAscii(cleaned, 'exif:DateTimeOriginal="2026:09:09 00:00:00"')).assertFalse();
+    });
+  });
+
+  describe('MovingPhotoMetadata', (): void => {
+    it('never classifies motion association keys as privacy metadata', 0, (): void => {
+      expect(IsoBmffMetadataReader.isPrivacyMetadataKey(
+        'com.apple.quicktime.still-image-time')).assertFalse();
+      expect(IsoBmffMetadataReader.isPrivacyMetadataKey(
+        'com.huawei.motionphoto.timestamp')).assertFalse();
+      expect(IsoBmffMetadataReader.isPrivacyMetadataKey(
+        'GCamera:MicroVideoPresentationTimestampUs')).assertFalse();
+      expect(IsoBmffMetadataReader.isPrivacyMetadataKey(
+        'com.apple.quicktime.content.identifier')).assertFalse();
+    });
+
+    it('continues to classify user-revealing container keys', 0, (): void => {
+      expect(IsoBmffMetadataReader.isPrivacyMetadataKey('com.apple.quicktime.location.ISO6709')).assertTrue();
+      expect(IsoBmffMetadataReader.isPrivacyMetadataKey('container.creationTime')).assertTrue();
+      expect(IsoBmffMetadataReader.isPrivacyMetadataKey('manufacturer')).assertTrue();
+      expect(IsoBmffMetadataReader.isPrivacyMetadataKey('author')).assertTrue();
+    });
+
+    it('scrubs privacy values but retains the timed-photo anchor byte-for-byte', 0, (): void => {
+      const locationKey: string = 'com.apple.quicktime.location.ISO6709';
+      const anchorKey: string = 'com.apple.quicktime.still-image-time';
+      const keyOne: number[] = uint32(locationKey.length + 8).concat(ascii('mdta'), ascii(locationKey));
+      const keyTwo: number[] = uint32(anchorKey.length + 8).concat(ascii('mdta'), ascii(anchorKey));
+      const keys: number[] = textBox('keys', [0, 0, 0, 0].concat(uint32(2), keyOne, keyTwo));
+      const dataPrefix: number[] = [0, 0, 0, 1, 0, 0, 0, 0];
+      const privateData: number[] = textBox('data', dataPrefix.concat(ascii('+31.2+121.5/')));
+      const anchorValue: number[] = [0xFF];
+      const anchorData: number[] = textBox('data', dataPrefix.concat(anchorValue));
+      const privateItem: number[] = box([0, 0, 0, 1], privateData);
+      const anchorItem: number[] = box([0, 0, 0, 2], anchorData);
+      const ilst: number[] = textBox('ilst', privateItem.concat(anchorItem));
+      const payload: Uint8Array = bytes(textBox('meta', [0, 0, 0, 0].concat(keys, ilst)));
+      const cleaned: Uint8Array = IsoBmffMetadataReader.sanitizeMoovPayload(payload);
+      expect(cleaned.length).assertEqual(payload.length);
+      // The final byte is the functional still-image-time value.
+      expect(cleaned[cleaned.length - 1]).assertEqual(0xFF);
+      const items = IsoBmffMetadataReader.inspectMoovPayload(cleaned);
+      // Binary association values are deliberately not surfaced as text;
+      // the privacy entry must be gone while the byte assertion above proves
+      // that the functional anchor survived.
+      expect(items.length).assertEqual(0);
     });
   });
 

@@ -60,13 +60,28 @@ export class IsoBmffMetadataReader {
     const payloadSize: number = moov.size - moov.headerSize;
     const bytes: Uint8Array = IsoBmffMetadataReader.readAt(fd, moov.start + moov.headerSize, payloadSize);
     if (bytes.length !== payloadSize) return false;
-    IsoBmffMetadataReader.scrubChildren(bytes, 0, bytes.length);
+    const sanitized: Uint8Array = IsoBmffMetadataReader.sanitizeMoovPayload(bytes);
     try {
       fileIo.lseek(fd, moov.start + moov.headerSize, fileIo.WhenceType.SEEK_SET);
-      return fileIo.writeSync(fd, bytes.buffer, { length: bytes.byteLength }) === bytes.byteLength;
+      return fileIo.writeSync(fd, sanitized.buffer, { length: sanitized.byteLength }) === sanitized.byteLength;
     } catch (_) {
       return false;
     }
+  }
+
+  /** Pure payload entry point used by the fd writer and deterministic tests. */
+  static sanitizeMoovPayload(bytes: Uint8Array): Uint8Array {
+    const output: Uint8Array = new Uint8Array(bytes.length);
+    output.set(bytes);
+    IsoBmffMetadataReader.scrubChildren(output, 0, output.length);
+    return output;
+  }
+
+  /** Reads only metadata items from an already bounded moov payload. */
+  static inspectMoovPayload(bytes: Uint8Array): IsoMetadataItem[] {
+    const items: IsoMetadataItem[] = [];
+    IsoBmffMetadataReader.parseChildren(bytes, 0, bytes.length, items, []);
+    return items;
   }
 
   /** True when the ISO-BMFF top-level structure contains a bounded moov. */
@@ -229,7 +244,7 @@ export class IsoBmffMetadataReader {
         const childEnd: number = childCursor + child.size;
         if (child.type === 'name') {
           key = IsoBmffMetadataReader.cleanText(bytes, Math.min(childStart + 4, childEnd), childEnd);
-        } else if (child.type === 'data' && IsoBmffMetadataReader.isPrivacyKey(key)) {
+        } else if (child.type === 'data' && IsoBmffMetadataReader.isPrivacyMetadataKey(key)) {
           // Keep the data type/locale prefix and box geometry intact.
           IsoBmffMetadataReader.zeroRange(bytes, Math.min(childStart + 8, childEnd), childEnd);
         }
@@ -250,8 +265,10 @@ export class IsoBmffMetadataReader {
       '\u00a9nam', '\u00a9cmt'].indexOf(type) >= 0;
   }
 
-  private static isPrivacyKey(key: string): boolean {
+  /** Shared classification for scanning, sanitizing and verification. */
+  static isPrivacyMetadataKey(key: string): boolean {
     const normalized: string = key.toLowerCase();
+    if (IsoBmffMetadataReader.isMovingPhotoStructureKey(normalized)) return false;
     const needles: string[] = ['location', 'latitude', 'longitude', 'gps', 'iso6709', 'creation',
       'created', 'datetime', 'date', 'author', 'artist', 'owner', 'copyright', 'manufacturer',
       'make', 'model', 'device', 'vendor', 'comment', 'description', 'title', 'software',
@@ -261,6 +278,14 @@ export class IsoBmffMetadataReader {
       if (normalized.indexOf(needles[index]) >= 0) return true;
     }
     return false;
+  }
+
+  /** Association/timing keys are required to keep the still and video paired. */
+  static isMovingPhotoStructureKey(key: string): boolean {
+    const normalized: string = key.toLowerCase();
+    return normalized.indexOf('still-image-time') >= 0 ||
+      normalized.indexOf('motion-photo') >= 0 || normalized.indexOf('motionphoto') >= 0 ||
+      normalized.indexOf('microvideo') >= 0 || normalized.indexOf('content.identifier') >= 0;
   }
 
   private static zeroRange(bytes: Uint8Array, start: number, end: number): void {

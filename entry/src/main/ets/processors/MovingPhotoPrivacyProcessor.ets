@@ -39,7 +39,8 @@ export class MovingPhotoPrivacyTool {
     const exported: string[] = await this.exportComponents(uri);
     try {
       const imageResult: PrivacyScanResult = await this.imageScanner.scan(fileUri.getUriFromPath(exported[0]));
-      const videoResult: PrivacyScanResult = await this.videoTool.scan(fileUri.getUriFromPath(exported[1]));
+      const videoResult: PrivacyScanResult =
+        await this.videoTool.scanMovingPhotoComponent(fileUri.getUriFromPath(exported[1]));
       const findings: PrivacyFinding[] = [];
       this.appendFindings(findings, imageResult.findings, 'moving-image-');
       this.appendFindings(findings, videoResult.findings, 'moving-video-');

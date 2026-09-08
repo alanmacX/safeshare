@@ -163,8 +163,9 @@ export class JpegMetadata {
             const quote: number = segment[valueStart++];
             const valueEnd: number = JpegMetadata.indexOfByte(segment, quote, valueStart);
             if (valueEnd >= 0) {
+              const containedValue: boolean = JpegMetadata.hasNonBlank(segment, valueStart, valueEnd);
               JpegMetadata.blank(segment, valueStart, valueEnd);
-              count++;
+              if (containedValue) count++;
               cursor = valueEnd + 1;
               continue;
             }
@@ -175,8 +176,9 @@ export class JpegMetadata {
           const close: string = `</${key}>`;
           const closeStart: number = JpegMetadata.indexOfAscii(segment, close, openEnd + 1);
           if (closeStart >= 0) {
+            const containedValue: boolean = JpegMetadata.hasNonBlank(segment, openEnd + 1, closeStart);
             JpegMetadata.blank(segment, openEnd + 1, closeStart);
-            count++;
+            if (containedValue) count++;
             cursor = closeStart + close.length;
             continue;
           }
@@ -189,6 +191,14 @@ export class JpegMetadata {
 
   private static blank(bytes: Uint8Array, start: number, end: number): void {
     for (let index: number = start; index < end; index++) bytes[index] = 0x20;
+  }
+
+  private static hasNonBlank(bytes: Uint8Array, start: number, end: number): boolean {
+    for (let index: number = start; index < end; index++) {
+      if (bytes[index] !== 0x00 && bytes[index] !== 0x09 && bytes[index] !== 0x0A &&
+        bytes[index] !== 0x0D && bytes[index] !== 0x20) return true;
+    }
+    return false;
   }
 
   private static indexOfAscii(bytes: Uint8Array, value: string, start: number): number {
