@@ -9,18 +9,6 @@ import { MetadataSanitizer } from '../metadata/MetadataSanitizer';
 import { TempFileManager } from '../storage/TempFileManager';
 import { AvPrivacyTool } from './AvPrivacyProcessor';
 
-class MovingPhotoHandler implements photoAccessHelper.MediaAssetDataHandler<photoAccessHelper.MovingPhoto> {
-  private resolveValue: (value: photoAccessHelper.MovingPhoto) => void;
-
-  constructor(resolveValue: (value: photoAccessHelper.MovingPhoto) => void) {
-    this.resolveValue = resolveValue;
-  }
-
-  onDataPrepared(data: photoAccessHelper.MovingPhoto): void {
-    this.resolveValue(data);
-  }
-}
-
 /** Dedicated image+video pipeline for picker-authorized MovingPhoto assets. */
 export class MovingPhotoPrivacyTool {
   private context: common.UIAbilityContext;
@@ -144,7 +132,13 @@ export class MovingPhotoPrivacyTool {
   private requestMovingPhoto(asset: photoAccessHelper.PhotoAsset): Promise<photoAccessHelper.MovingPhoto> {
     return new Promise((resolve: (value: photoAccessHelper.MovingPhoto) => void,
       reject: (reason?: Error) => void): void => {
-      const handler: MovingPhotoHandler = new MovingPhotoHandler(resolve);
+      // MediaAssetManager invokes the callback as a plain native function;
+      // class methods therefore receive no bound `this`. Capture resolve in
+      // an arrow closure so callback dispatch can never dereference an
+      // undefined handler instance (the previous implementation crashed).
+      const handler: photoAccessHelper.MediaAssetDataHandler<photoAccessHelper.MovingPhoto> = {
+        onDataPrepared: (data: photoAccessHelper.MovingPhoto): void => resolve(data)
+      };
       photoAccessHelper.MediaAssetManager.requestMovingPhoto(this.context, asset,
         { deliveryMode: photoAccessHelper.DeliveryMode.HIGH_QUALITY_MODE }, handler)
         .catch((): void => reject(new Error('MOVING_PHOTO_REQUEST_FAILED')));
