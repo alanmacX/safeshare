@@ -3,6 +3,10 @@ import { fileIo, fileUri } from '@kit.CoreFileKit';
 import { image } from '@kit.ImageKit';
 
 const TEMP_PREFIX: string = 'safeshare-';
+// A MovingPhoto is backed by two sandbox files. Share callbacks and a new
+// share-intent can race, so protection must be shared by every manager
+// instance instead of being tied to a page/service instance.
+const PROTECTED_PATHS: Set<string> = new Set();
 
 export class WatermarkAsset {
   path: string;
@@ -117,8 +121,17 @@ export class TempFileManager {
 
   scheduleRemoval(path: string, delayMs: number = 120000): void {
     setTimeout(() => {
+      if (PROTECTED_PATHS.has(path)) return;
       this.remove(path);
     }, delayMs);
+  }
+
+  protect(path: string): void {
+    PROTECTED_PATHS.add(path);
+  }
+
+  release(path: string): void {
+    PROTECTED_PATHS.delete(path);
   }
 
   async removeStaleFiles(protectedUris: string[] = []): Promise<void> {
@@ -128,6 +141,10 @@ export class TempFileManager {
         const name: string = names[index];
         if (name.startsWith(TEMP_PREFIX)) {
           let protectedEntry: boolean = false;
+          const entryPath: string = `${this.context.cacheDir}/${name}`;
+          PROTECTED_PATHS.forEach((path: string) => {
+            if (path === entryPath || path.startsWith(`${entryPath}/`)) protectedEntry = true;
+          });
           for (let protectedIndex: number = 0; protectedIndex < protectedUris.length; protectedIndex++) {
             let protectedUri: string = protectedUris[protectedIndex];
             try { protectedUri = decodeURIComponent(protectedUri); } catch (_) {}
@@ -137,7 +154,7 @@ export class TempFileManager {
             }
           }
           if (protectedEntry) continue;
-          const path: string = `${this.context.cacheDir}/${name}`;
+          const path: string = entryPath;
           try {
             const stat: fileIo.Stat = fileIo.statSync(path);
             if (stat.isDirectory()) {

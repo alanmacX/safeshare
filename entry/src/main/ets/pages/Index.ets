@@ -1368,11 +1368,18 @@ struct Index {
 
   private uriMatchesFile(uris: string[], file: SanitizedFile): boolean {
     for (let index: number = 0; index < uris.length; index++) {
-      let candidate: string = uris[index];
+      const rawCandidate: string = uris[index];
+      if (rawCandidate === file.uri) return true;
+      let candidate: string = rawCandidate;
+      let fileUriValue: string = file.uri;
       try { candidate = decodeURIComponent(candidate); } catch (_) {}
+      try { fileUriValue = decodeURIComponent(fileUriValue); } catch (_) {}
+      if (candidate === fileUriValue) return true;
       const query: number = candidate.indexOf('?');
       if (query >= 0) candidate = candidate.substring(0, query);
-      if (candidate === file.uri || candidate === `file://${file.path}` ||
+      const fileQuery: number = fileUriValue.indexOf('?');
+      if (fileQuery >= 0) fileUriValue = fileUriValue.substring(0, fileQuery);
+      if (candidate === fileUriValue || candidate === `file://${file.path}` ||
         candidate.endsWith(`/${file.path.substring(file.path.lastIndexOf('/') + 1)}`)) {
         return true;
       }

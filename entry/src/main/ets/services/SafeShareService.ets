@@ -36,6 +36,7 @@ export class SafeShareService {
   private avTool: AvPrivacyTool;
   private movingPhotoTool: MovingPhotoPrivacyTool;
   private movingPhotoUris: string[] = [];
+  private localMovingPhotos: Map<string, SanitizedFile> = new Map();
   private capabilitiesByUri: Map<string, MediaCapability> = new Map();
   private sender: ShareSender;
   private tempFiles: TempFileManager;
@@ -84,6 +85,7 @@ export class SafeShareService {
   }
 
   async resolveKind(uri: string, utd: string = ''): Promise<FileKind> {
+    if (this.localMovingPhoto(uri) !== undefined) return FileKind.IMAGE;
     if (utd === 'openharmony.moving-photo' || await this.movingPhotoTool.isMovingPhoto(uri)) {
       this.rememberMovingPhoto(uri);
       return FileKind.IMAGE;
@@ -102,6 +104,12 @@ export class SafeShareService {
     resolvedKind: FileKind = FileKind.UNKNOWN): Promise<PrivacyScanResult> {
     const kind: FileKind = resolvedKind === FileKind.UNKNOWN ? await this.resolveKind(uri, utd) : resolvedKind;
     if (kind === FileKind.IMAGE) {
+      const local: SanitizedFile | undefined = this.localMovingPhoto(uri);
+      if (local !== undefined) {
+        const result: PrivacyScanResult = await this.movingPhotoTool.scanLocal(uri, local.cleanupPaths);
+        result.fileKind = FileKind.IMAGE;
+        return this.applyCapability(result, FileKind.IMAGE);
+      }
       if (this.isKnownMovingPhoto(uri) || await this.movingPhotoTool.isMovingPhoto(uri)) {
         this.rememberMovingPhoto(uri);
         const result: PrivacyScanResult = await this.movingPhotoTool.scan(uri);
@@ -148,10 +156,18 @@ export class SafeShareService {
     const kind: FileKind = resolvedKind === FileKind.UNKNOWN ? await this.resolveKind(uri, utd) : resolvedKind;
     this.assertSupportedOperations(uri, actions, policy, pdfWatermark);
     if (kind === FileKind.IMAGE) {
+      const local: SanitizedFile | undefined = this.localMovingPhoto(uri);
+      if (local !== undefined) {
+        const file: SanitizedFile = await this.movingPhotoTool.sanitizeLocal(local.cleanupPaths, actions, policy);
+        this.registerLocalMovingPhoto(file);
+        return file;
+      }
       if (this.isKnownMovingPhoto(uri) || utd === 'openharmony.moving-photo' ||
         await this.movingPhotoTool.isMovingPhoto(uri)) {
         this.rememberMovingPhoto(uri);
-        return await this.movingPhotoTool.sanitize(uri, actions, policy);
+        const file: SanitizedFile = await this.movingPhotoTool.sanitize(uri, actions, policy);
+        this.registerLocalMovingPhoto(file);
+        return file;
       }
       const file: SanitizedFile = await this.imageProcessor.sanitize(uri, actions, policy);
       file.fileKind = FileKind.IMAGE;
@@ -250,8 +266,12 @@ export class SafeShareService {
     }
   }
 
-  dispose(): Promise<void> {
-    return this.imageProcessor.dispose();
+  async dispose(): Promise<void> {
+    const files: SanitizedFile[] = this.uniqueLocalMovingPhotos();
+    for (let index: number = 0; index < files.length; index++) {
+      await this.removeSanitizedFile(files[index]);
+    }
+    await this.imageProcessor.dispose();
   }
 
   private ooxmlToolFor(kind: FileKind): OoxmlFamilyTool {
@@ -268,9 +288,37 @@ export class SafeShareService {
     if (!this.isKnownMovingPhoto(uri)) this.movingPhotoUris.push(uri);
   }
 
-  private async removeSanitizedFile(file: SanitizedFile): Promise<void> {
+  private registerLocalMovingPhoto(file: SanitizedFile): void {
+    this.localMovingPhotos.set(file.uri, file);
+    try { this.localMovingPhotos.set(decodeURIComponent(file.uri), file); } catch (_) {}
     const paths: string[] = file.cleanupPaths.length > 0 ? file.cleanupPaths : [file.path];
-    for (let index: number = 0; index < paths.length; index++) await this.tempFiles.remove(paths[index]);
+    for (let index: number = 0; index < paths.length; index++) this.tempFiles.protect(paths[index]);
+  }
+
+  private localMovingPhoto(uri: string): SanitizedFile | undefined {
+    const exact: SanitizedFile | undefined = this.localMovingPhotos.get(uri);
+    if (exact !== undefined) return exact;
+    try { return this.localMovingPhotos.get(decodeURIComponent(uri)); } catch (_) { return undefined; }
+  }
+
+  private async removeSanitizedFile(file: SanitizedFile): Promise<void> {
+    const keys: string[] = Array.from(this.localMovingPhotos.keys());
+    for (let index: number = 0; index < keys.length; index++) {
+      if (this.localMovingPhotos.get(keys[index]) === file) this.localMovingPhotos.delete(keys[index]);
+    }
+    const paths: string[] = file.cleanupPaths.length > 0 ? file.cleanupPaths : [file.path];
+    for (let index: number = 0; index < paths.length; index++) {
+      this.tempFiles.release(paths[index]);
+      await this.tempFiles.remove(paths[index]);
+    }
+  }
+
+  private uniqueLocalMovingPhotos(): SanitizedFile[] {
+    const result: SanitizedFile[] = [];
+    this.localMovingPhotos.forEach((file: SanitizedFile) => {
+      if (result.indexOf(file) < 0) result.push(file);
+    });
+    return result;
   }
 
   private applyCapability(result: PrivacyScanResult, kind: FileKind): PrivacyScanResult {

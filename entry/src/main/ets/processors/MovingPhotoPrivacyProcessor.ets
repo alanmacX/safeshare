@@ -38,22 +38,15 @@ export class MovingPhotoPrivacyTool {
   async scan(uri: string): Promise<PrivacyScanResult> {
     const exported: string[] = await this.exportComponents(uri);
     try {
-      const imageResult: PrivacyScanResult = await this.imageScanner.scan(fileUri.getUriFromPath(exported[0]));
-      const videoResult: PrivacyScanResult = await this.videoTool.scan(fileUri.getUriFromPath(exported[1]));
-      const findings: PrivacyFinding[] = [];
-      this.appendFindings(findings, imageResult.findings, 'moving-image-');
-      this.appendFindings(findings, videoResult.findings, 'moving-video-');
-      const result: PrivacyScanResult = new PrivacyScanResult(uri, findings);
-      result.mimeType = 'application/x-harmony-moving-photo';
-      result.pixelWidth = imageResult.pixelWidth;
-      result.pixelHeight = imageResult.pixelHeight;
-      result.isMovingPhoto = true;
-      result.visualEditsSupported = false;
-      result.capabilityWarnings = ['动态照片已分别检查封面和视频；当前只支持 metadata，不执行水印、人脸或二维码处理'];
-      return result;
+      return await this.scanComponents(uri, exported[0], exported[1]);
     } finally {
       await this.removeAll(exported);
     }
+  }
+
+  scanLocal(uri: string, paths: string[]): Promise<PrivacyScanResult> {
+    this.assertLocalComponents(paths);
+    return this.scanComponents(uri, paths[0], paths[1]);
   }
 
   async sanitize(uri: string, actions: RedactionAction[], policy: MetadataPolicy): Promise<SanitizedFile> {
@@ -61,15 +54,44 @@ export class MovingPhotoPrivacyTool {
       throw new Error('MOVING_PHOTO_VISUAL_EDIT_UNSUPPORTED');
     }
     const exported: string[] = await this.exportComponents(uri);
+    try {
+      return await this.sanitizeComponents(exported[0], exported[1], policy);
+    } finally {
+      await this.removeAll(exported);
+    }
+  }
+
+  sanitizeLocal(paths: string[], actions: RedactionAction[], policy: MetadataPolicy): Promise<SanitizedFile> {
+    if (actions.length > 0 || policy.purposeWatermark.trim().length > 0 || policy.imageWatermarkUri.length > 0) {
+      throw new Error('MOVING_PHOTO_VISUAL_EDIT_UNSUPPORTED');
+    }
+    this.assertLocalComponents(paths);
+    return this.sanitizeComponents(paths[0], paths[1], policy);
+  }
+
+  private async scanComponents(uri: string, imagePath: string, videoPath: string): Promise<PrivacyScanResult> {
+    const imageResult: PrivacyScanResult = await this.imageScanner.scan(fileUri.getUriFromPath(imagePath));
+    const videoResult: PrivacyScanResult = await this.videoTool.scan(fileUri.getUriFromPath(videoPath));
+    const findings: PrivacyFinding[] = [];
+    this.appendFindings(findings, imageResult.findings, 'moving-image-');
+    this.appendFindings(findings, videoResult.findings, 'moving-video-');
+    const result: PrivacyScanResult = new PrivacyScanResult(uri, findings);
+    result.mimeType = 'application/x-harmony-moving-photo';
+    result.pixelWidth = imageResult.pixelWidth;
+    result.pixelHeight = imageResult.pixelHeight;
+    result.isMovingPhoto = true;
+    result.visualEditsSupported = false;
+    result.capabilityWarnings = ['动态照片已分别检查封面和视频；当前只支持 metadata，不执行水印、人脸或二维码处理'];
+    return result;
+  }
+
+  private async sanitizeComponents(imagePath: string, videoPath: string,
+    policy: MetadataPolicy): Promise<SanitizedFile> {
     let imageFile: SanitizedFile | undefined = undefined;
     let videoFile: SanitizedFile | undefined = undefined;
     try {
-      imageFile = await this.imageSanitizer.sanitize(fileUri.getUriFromPath(exported[0]), [], policy);
-      // loadMovingPhoto creates the local association from these two sandbox
-      // resources. Copy only encoded audio/video tracks into a fresh MP4:
-      // this preserves playback without carrying source container metadata
-      // or depending on vendor-private metadata tracks.
-      videoFile = await this.videoTool.sanitize(fileUri.getUriFromPath(exported[1]), true);
+      imageFile = await this.imageSanitizer.sanitize(fileUri.getUriFromPath(imagePath), [], policy);
+      videoFile = await this.videoTool.sanitize(fileUri.getUriFromPath(videoPath), true);
       const localMovingPhoto: photoAccessHelper.MovingPhoto =
         await photoAccessHelper.MediaAssetManager.loadMovingPhoto(this.context, imageFile.uri, videoFile.uri);
       const verification: PrivacyScanResult = new PrivacyScanResult('', []);
@@ -88,8 +110,12 @@ export class MovingPhotoPrivacyTool {
       if (imageFile !== undefined) await this.tempFiles.remove(imageFile.path);
       if (videoFile !== undefined) await this.tempFiles.remove(videoFile.path);
       throw error as Error;
-    } finally {
-      await this.removeAll(exported);
+    }
+  }
+
+  private assertLocalComponents(paths: string[]): void {
+    if (paths.length < 2 || !fileIo.accessSync(paths[0]) || !fileIo.accessSync(paths[1])) {
+      throw new Error('MOVING_PHOTO_LOCAL_COMPONENTS_UNAVAILABLE');
     }
   }
 
