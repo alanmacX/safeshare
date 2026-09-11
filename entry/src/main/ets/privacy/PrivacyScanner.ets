@@ -107,17 +107,41 @@ export class PrivacyScanner {
   }
 
   private applyCapability(result: PrivacyScanResult, capability: MediaCapability): void {
-    result.formatId = capability.id;
-    result.formatLabel = capability.label;
-    result.metadataCleanSupported = capability.metadataClean;
-    result.visualEditsSupported = capability.textWatermark || capability.imageWatermark ||
-      capability.face || capability.qr;
-    result.textWatermarkSupported = capability.textWatermark;
-    result.imageWatermarkSupported = capability.imageWatermark;
-    result.faceSupported = capability.face;
-    result.qrSupported = capability.qr;
-    result.losslessMetadata = capability.losslessMetadata;
-    result.readOnlyTool = !capability.metadataClean;
+    // Force the concrete JPEG/PNG/WebP catalog when ImageSource omitted mime.
+    // An empty mime used to collapse to image-unknown and silently disable
+    // watermark/face/QR for ordinary still images.
+    let effective: MediaCapability = capability;
+    if (effective.id === 'image-unknown' && result.pixelWidth > 0 && result.pixelHeight > 0) {
+      const guess: string = this.guessMimeType(result.uri);
+      if (guess.length > 0) effective = MediaCapabilityRegistry.image(guess, false);
+    }
+    result.formatId = effective.id;
+    result.formatLabel = effective.label;
+    result.metadataCleanSupported = effective.metadataClean;
+    result.visualEditsSupported = effective.textWatermark || effective.imageWatermark ||
+      effective.face || effective.qr;
+    result.textWatermarkSupported = effective.textWatermark;
+    result.imageWatermarkSupported = effective.imageWatermark;
+    result.faceSupported = effective.face;
+    result.qrSupported = effective.qr;
+    result.losslessMetadata = effective.losslessMetadata;
+    result.readOnlyTool = !effective.metadataClean;
+    if (result.mimeType.length === 0 && effective.id === 'jpeg') result.mimeType = 'image/jpeg';
+    if (result.mimeType.length === 0 && effective.id === 'png') result.mimeType = 'image/png';
+    if (result.mimeType.length === 0 && effective.id === 'webp') result.mimeType = 'image/webp';
+  }
+
+  private guessMimeType(uri: string): string {
+    const lower: string = uri.toLowerCase();
+    if (lower.indexOf('.jpg') >= 0 || lower.indexOf('.jpeg') >= 0) return 'image/jpeg';
+    if (lower.indexOf('.png') >= 0) return 'image/png';
+    if (lower.indexOf('.webp') >= 0) return 'image/webp';
+    if (lower.indexOf('.gif') >= 0) return 'image/gif';
+    if (lower.indexOf('.heic') >= 0 || lower.indexOf('.heif') >= 0) return 'image/heif';
+    if (lower.indexOf('.bmp') >= 0) return 'image/bmp';
+    if (lower.indexOf('.tif') >= 0 || lower.indexOf('.tiff') >= 0) return 'image/tiff';
+    if (lower.indexOf('.dng') >= 0) return 'image/x-adobe-dng';
+    return '';
   }
 
   async verifyVisual(uri: string, actions: RedactionAction[]): Promise<PrivacyFinding[]> {
@@ -145,7 +169,11 @@ export class PrivacyScanner {
       if (needsQr) {
         remaining.push(...await this.scanQrFromDetectionMap(map, scaleX, scaleY));
       }
-      if (needsFace && canIUse('SystemCapability.AI.Face.Detector')) {
+      if (needsFace) {
+        if (!canIUse('SystemCapability.AI.Face.Detector')) {
+          // Do not report success when the face recheck could not run.
+          throw new Error('FACE_VERIFY_UNAVAILABLE');
+        }
         remaining.push(...await this.faceScanner.scan(map, scaleX, scaleY));
       }
       return this.onlyOverlapping(remaining, actions);

@@ -36,8 +36,12 @@ export class ImagePrivacyProcessor implements PrivacyProcessor {
         throw new Error('Visual privacy verification failed.');
       }
       return file;
-    } catch (_) {
+    } catch (error) {
       await this.tempFiles.remove(file.path);
+      const stage: string = (error as Error).message;
+      if (stage === 'FACE_VERIFY_UNAVAILABLE' || stage.indexOf('Unable to verify') >= 0) {
+        throw new Error(stage);
+      }
       throw new Error('Unable to verify visual redaction.');
     }
   }

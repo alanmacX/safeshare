@@ -5,6 +5,11 @@ import { JpegMetadata, JpegMetadataSummary } from '../main/ets/metadata/JpegMeta
 import { MediaCapabilityRegistry, SupportGrade } from '../main/ets/metadata/MediaCapabilityRegistry';
 import { FileKind } from '../main/ets/processors/FileTypeRouter';
 import { IsoBmffMetadataReader } from '../main/ets/processors/IsoBmffMetadataReader';
+import { MovingPhotoContainer, MovingPhotoLayout } from '../main/ets/processors/MovingPhotoContainer';
+import { HeifMetadata } from '../main/ets/metadata/HeifMetadata';
+import { Mp3Metadata, Mp3MetadataSummary } from '../main/ets/metadata/Mp3Metadata';
+import { FlacMetadata } from '../main/ets/metadata/FlacMetadata';
+import { WavMetadata } from '../main/ets/metadata/WavMetadata';
 
 function bytes(values: number[]): Uint8Array {
   return new Uint8Array(values);
@@ -180,6 +185,141 @@ export default function testsuite(): void {
     });
   });
 
+  describe('MovingPhotoContainer', (): void => {
+    function jpegWithXmp(xmp: string, scanPayload: number[]): number[] {
+      const payload: number[] = ascii('http://ns.adobe.com/xap/1.0/\u0000' + xmp);
+      const app1: number[] = [0xFF, 0xE1].concat(
+        [((payload.length + 2) >>> 8) & 0xFF, (payload.length + 2) & 0xFF], payload);
+      const scan: number[] = [0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3F, 0x00]
+        .concat(scanPayload, [0xFF, 0xD9]);
+      return [0xFF, 0xD8].concat(app1, scan);
+    }
+
+    function minimalMp4(extra: number[] = []): number[] {
+      const ftyp: number[] = textBox('ftyp', ascii('isom').concat([0, 0, 0, 0], ascii('isom')));
+      const free: number[] = textBox('free', extra.length > 0 ? extra : ascii('privacy'));
+      return ftyp.concat(free);
+    }
+
+    it('splits a Huawei/Google style JPEG+MP4 composite', 0, (): void => {
+      const xmp: string = 'GCamera:MicroVideo="1" GCamera:MicroVideoOffset="40" ' +
+        'exif:DateTimeOriginal="2026:01:02 03:04:05"';
+      const jpeg: number[] = jpegWithXmp(xmp, [0x11, 0x22, 0x33]);
+      const video: number[] = minimalMp4();
+      const composite: Uint8Array = bytes(jpeg.concat(video));
+      const layout: MovingPhotoLayout = MovingPhotoContainer.inspect(composite);
+      expect(layout.isComposite).assertTrue();
+      expect(layout.imageEnd).assertEqual(jpeg.length);
+      expect(layout.videoStart).assertEqual(jpeg.length);
+      expect(layout.videoLength).assertEqual(video.length);
+      const imageSlice: Uint8Array = MovingPhotoContainer.imageSlice(composite, layout);
+      const videoSlice: Uint8Array = MovingPhotoContainer.videoSlice(composite, layout);
+      expect(imageSlice.length).assertEqual(jpeg.length);
+      expect(videoSlice.length).assertEqual(video.length);
+      expect(MovingPhotoContainer.isIsoBmffAt(videoSlice, 0)).assertTrue();
+      // Cover still ends at FFD9; trailing video is never part of the JPEG.
+      expect(imageSlice[imageSlice.length - 1]).assertEqual(0xD9);
+      expect(imageSlice[imageSlice.length - 2]).assertEqual(0xFF);
+    });
+
+    it('keeps a still-only JPEG classified as non-composite', 0, (): void => {
+      const jpeg: Uint8Array = bytes(jpegWithXmp('GCamera:MicroVideo="1"', [0x44]));
+      const layout: MovingPhotoLayout = MovingPhotoContainer.inspect(jpeg);
+      expect(layout.isComposite).assertFalse();
+      expect(MovingPhotoContainer.hasMotionXmp(jpeg)).assertTrue();
+    });
+
+    it('does not invent a video when trailing bytes are not ISO-BMFF', 0, (): void => {
+      const jpeg: number[] = jpegWithXmp('GCamera:MicroVideo="1"', [0x55]);
+      const garbage: Uint8Array = bytes(jpeg.concat([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]));
+      const layout: MovingPhotoLayout = MovingPhotoContainer.inspect(garbage);
+      expect(layout.isComposite).assertFalse();
+      expect(layout.reason).assertEqual('trailing-not-isobmff');
+    });
+
+    it('rebuilds a shareable composite with a refreshed MicroVideoOffset', 0, (): void => {
+      const jpeg: number[] = jpegWithXmp('GCamera:MicroVideo="1" GCamera:MicroVideoOffset="0040"', [0x21]);
+      const video: number[] = minimalMp4([0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]);
+      const composed: Uint8Array = MovingPhotoContainer.compose(bytes(jpeg), bytes(video));
+      const layout: MovingPhotoLayout = MovingPhotoContainer.inspect(composed);
+      expect(layout.isComposite).assertTrue();
+      expect(layout.videoLength).assertEqual(video.length);
+      expect(containsAscii(composed, `GCamera:MicroVideoOffset="${video.length}"`)).assertTrue();
+      expect(MovingPhotoContainer.looksLikeMovingPhoto(composed)).assertTrue();
+    });
+
+    it('injects motion XMP when the cleaned cover lost association keys', 0, (): void => {
+      const plainJpeg: number[] = jpegWithXmp('tiff:Make="HUAWEI"', [0x31]);
+      const video: number[] = minimalMp4([0x0A]);
+      const composed: Uint8Array = MovingPhotoContainer.compose(bytes(plainJpeg), bytes(video));
+      expect(containsAscii(composed, 'GCamera:MicroVideo="1"')).assertTrue();
+      expect(containsAscii(composed, `GCamera:MicroVideoOffset="${video.length}"`)).assertTrue();
+      const layout: MovingPhotoLayout = MovingPhotoContainer.inspect(composed);
+      expect(layout.isComposite).assertTrue();
+      expect(layout.videoStart).assertEqual(MovingPhotoContainer.jpegStillEnd(composed));
+    });
+  });
+
+  describe('HeifMetadata', (): void => {
+    it('detects HEIF brands and rejects non-HEIF', 0, (): void => {
+      const heif: Uint8Array = bytes([
+        0, 0, 0, 24, 0x66, 0x74, 0x79, 0x70, 0x68, 0x65, 0x69, 0x63,
+        0, 0, 0, 0, 0x68, 0x65, 0x69, 0x63, 0, 0, 0, 0
+      ]);
+      expect(HeifMetadata.isHeif(heif)).assertTrue();
+      expect(HeifMetadata.isHeif(bytes([0xFF, 0xD8, 0xFF]))).assertFalse();
+    });
+  });
+
+  describe('Mp3Metadata', (): void => {
+    it('strips ID3v2/ID3v1 and keeps audio frames', 0, (): void => {
+      const id3v2: number[] = [0x49, 0x44, 0x33, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0A,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+      const frame: number[] = [0xFF, 0xFB, 0x90, 0x00, 0x11, 0x22, 0x33, 0x44];
+      const id3v1: number[] = [];
+      id3v1.push(0x54, 0x41, 0x47);
+      for (let i: number = 0; i < 125; i++) id3v1.push(0x20);
+      const input: Uint8Array = bytes(id3v2.concat(frame, id3v1));
+      const output: Uint8Array = Mp3Metadata.sanitize(input);
+      expect(output.length).assertEqual(frame.length);
+      expect(output[0]).assertEqual(0xFF);
+      const summary: Mp3MetadataSummary = Mp3Metadata.inspect(output);
+      expect(summary.id3v2Count).assertEqual(0);
+      expect(summary.id3v1Count).assertEqual(0);
+    });
+  });
+
+  describe('FlacMetadata', (): void => {
+    it('keeps STREAMINFO and drops Vorbis Comment', 0, (): void => {
+      // fLaC + STREAMINFO (type 0, len 4) + VORBIS_COMMENT (type 4, len 4) + last flag
+      const streamInfo: number[] = [0x00, 0x00, 0x00, 0x04, 1, 2, 3, 4];
+      const comment: number[] = [0x84, 0x00, 0x00, 0x04, 0x76, 0x6F, 0x72, 0x62];
+      const frames: number[] = [0xFF, 0xF8, 0x01, 0x02, 0x03];
+      const input: Uint8Array = bytes([0x66, 0x4C, 0x61, 0x43].concat(streamInfo, comment, frames));
+      const output: Uint8Array = FlacMetadata.sanitize(input);
+      expect(output.length).assertEqual(4 + streamInfo.length + frames.length);
+      expect(FlacMetadata.inspect(output).vorbisCommentCount).assertEqual(0);
+      expect(output[output.length - 1]).assertEqual(0x03);
+    });
+  });
+
+  describe('WavMetadata', (): void => {
+    it('keeps fmt/data and drops LIST INFO', 0, (): void => {
+      const header: number[] = [0x52, 0x49, 0x46, 0x46, 0, 0, 0, 0, 0x57, 0x41, 0x56, 0x45];
+      const fmt: number[] = [0x66, 0x6D, 0x74, 0x20, 2, 0, 0, 0, 0x01, 0x00];
+      const data: number[] = [0x64, 0x61, 0x74, 0x61, 2, 0, 0, 0, 0x11, 0x22];
+      const list: number[] = [0x4C, 0x49, 0x53, 0x54, 4, 0, 0, 0, 0x49, 0x4E, 0x46, 0x4F];
+      const input: Uint8Array = bytes(header.concat(fmt, data, list));
+      // Patch RIFF size
+      const total: number = input.length;
+      input[4] = (total - 8) & 0xFF;
+      input[5] = ((total - 8) >> 8) & 0xFF;
+      const output: Uint8Array = WavMetadata.sanitize(input);
+      expect(WavMetadata.inspect(output).listInfoCount).assertEqual(0);
+      expect(WavMetadata.isWav(output)).assertTrue();
+    });
+  });
+
   describe('MediaCapabilityRegistry', (): void => {
     it('keeps animated and HDR-safe formats metadata-only', 0, (): void => {
       const gif = MediaCapabilityRegistry.image('image/gif', true);
@@ -198,6 +338,12 @@ export default function testsuite(): void {
       expect(jpeg.qr).assertTrue();
       expect(tiff.face).assertFalse();
       expect(tiff.metadataClean).assertTrue();
+    });
+
+    it('marks moving photos unsupported', 0, (): void => {
+      const moving = MediaCapabilityRegistry.movingPhoto();
+      expect(moving.grade).assertEqual(SupportGrade.UNSUPPORTED);
+      expect(moving.metadataClean).assertFalse();
     });
 
     it('marks unsupported audio cleanup before processing', 0, (): void => {

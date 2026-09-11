@@ -30,7 +30,9 @@ export class ContainerMetadata {
     const summary: ContainerMetadataSummary = new ContainerMetadataSummary();
     const output: Uint8Array = ContainerMetadata.parsePng(bytes, summary, true);
     const verified: ContainerMetadataSummary = ContainerMetadata.inspectPng(output);
-    if (verified.textCount !== 0) throw new Error('PNG text metadata remained after rewriting.');
+    if (verified.textCount !== 0 || verified.exifCount !== 0) {
+      throw new Error('PNG metadata remained after rewriting.');
+    }
     return output;
   }
 
@@ -69,7 +71,9 @@ export class ContainerMetadata {
       const textual: boolean = type === 'tEXt' || type === 'zTXt' || type === 'iTXt';
       if (textual) summary.textCount++;
       if (type === 'eXIf') summary.exifCount++;
-      if (!sanitize || !textual) {
+      // Drop textual chunks and embedded EXIF (GPS/device) on sanitize.
+      const drop: boolean = sanitize && (textual || type === 'eXIf');
+      if (!drop) {
         const part: Uint8Array = bytes.subarray(cursor, end);
         outputs.push(part);
         outputLength += part.length;

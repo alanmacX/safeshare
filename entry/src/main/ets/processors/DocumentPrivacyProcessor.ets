@@ -315,7 +315,13 @@ export class PdfPrivacyProcessor {
     try {
       await fileIo.moveFile(verifyPath, outputPath);
     } catch (_) {
-      await fileIo.copyFile(verifyPath, outputPath);
+      try {
+        await fileIo.copyFile(verifyPath, outputPath);
+      } catch (_) {
+        await this.tempFiles.remove(verifyPath);
+        await this.tempFiles.remove(outputPath);
+        throw new Error('PDF_COPY_FAILED:PUBLISH');
+      }
       await this.tempFiles.remove(verifyPath);
     }
     const outcome: PdfSanitizeOutcome = {

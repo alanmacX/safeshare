@@ -30,7 +30,7 @@ Gallery / Files / Browser
 | FileKind | 扫描工具 | 清理方式 | 输出验证 |
 |---|---|---|---|
 | IMAGE | MetadataScanner + QR/Face 端侧视觉 | 像素重编码 + 局部遮盖 | MetadataScanner 复检 + 视觉复检 |
-| MOVING_PHOTO（UI 归类为 IMAGE） | `PhotoAsset.PHOTO_SUBTYPE` 识别后拆分封面与视频，分别使用图片与 ISO-BMFF 扫描器 | 封面原格式 metadata 路径；视频仅定长清除隐私 `moov` 值，保留全部轨道、样本和动态照片锚点；`loadMovingPhoto` 重组 | 封面和视频分别零 finding 后才产生组合 URI；两个沙箱组件按同一生命周期清理 |
+| MOVING_PHOTO | **不支持** | 识别到动态照片（UTD / 内容复合体 / PHOTO_SUBTYPE）后直接拒绝进入扫描与清理 | 无输出 |
 | PDF | PDF Kit `PdfDocument.getMetadata()`（title/author/subject/keywords/creator/producer/创建/修改时间） | PDF Kit `loadDocument → saveDocument` 重写副本 | 重扫副本须零 finding，否则删除输出 |
 | WORD/EXCEL/POWERPOINT | `OoxmlFamilyTool`：解析 ZIP → 解压 `docProps/core.xml`、`app.xml`、`custom.xml`，解析 dc:creator / cp:lastModifiedBy / Company / Manager / 自定义属性等 | 自建 `ZipContainer` 重打包：仅重写三个 docProps 条目（STORE 模式、XML 结构保持有效），其余条目原字节拷贝，时间戳固定 | 重扫副本须零 finding，否则删除输出 |
 | AUDIO_VIDEO | `AVMetadataExtractor` + ISO-BMFF 容器字段 | MP4/M4A 复制编码轨道重封装；其他音频只读 | 输出重扫须零 finding，否则删除 |

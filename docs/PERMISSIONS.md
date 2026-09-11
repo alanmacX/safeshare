@@ -1,17 +1,18 @@
 # Permissions
 
-当前 `module.json5` 没有声明任何运行时权限。
+`module.json5` **不声明** `ohos.permission.READ_IMAGEVIDEO`。
 
-| 能力 | 权限 | 用户场景 | 说明 |
-|---|---|---|---|
-| 接收分享 | 无额外权限 | 用户主动从系统分享面板选择安全分享 | Share Kit/Wanted URI 提供临时访问授权 |
-| 主动选图 | 无额外权限 | 用户点击“选择图片” | 使用系统 PhotoViewPicker，而非申请全量媒体库权限 |
-| 主动选文档/音视频 | 无额外权限 | 用户点击“PDF / Office / 音视频检查” | 使用系统 DocumentViewPicker，按后缀过滤，由用户逐个选择 |
-| 图片元数据读写 | 无额外权限 | 读取用户选中的 URI，写应用缓存副本 | 原文件只读 |
-| PDF 元数据读写 | 无额外权限 | PDF Kit 读取用户选中文件的元数据；在沙箱副本中等长清空可确定的 Info 字段并复检 | provider URI 仅按需复制到沙箱；原文件只读；不能安全解析时停止生成并删除副本 |
-| Office 文档属性读写 | 无额外权限 | 解析用户选中的 docx/xlsx/pptx 的 ZIP 容器并重写 docProps | 仅重写文档属性 XML；正文条目原字节保留；原文件只读 |
-| 音视频元数据读取 | 无额外权限 | 读取用户选中的音视频容器元数据 | AVMetadataExtractor 以只读 fd 访问；不生成副本 |
-| 端侧视觉检查 | 无额外权限 | 用户主动选择/分享图片后进行人脸和码检查 | Core Vision/Scan Kit 在设备上处理，失败可降级 |
-| 分享副本 | 无额外权限 | 用户预览后点击“安全分享” | Share Kit 将缓存文件 URI 授权给目标应用 |
+AppGallery 已驳回该受限权限申请：仅允许数据克隆备份、相册整理、智能视频生成等场景，「分享前隐私清理」不符合。因此：
 
-未来新增权限必须先记录用途、用户可见场景、是否受限以及 AppGallery 说明；不得为尚未实现的能力预申请权限。
+- 分享入口 **不再声明** `openharmony.moving-photo`
+- 识别到动态照片（UTD / 复合文件 / `PHOTO_SUBTYPE`）后 **直接拒绝**，不进入处理
+- 产品范围只覆盖普通静态图、PDF、Office、音视频
+
+| 能力 | 权限 | 说明 |
+|---|---|---|
+| 接收分享 | 无 | Share Kit/Wanted URI 临时授权 |
+| 主动选图 | 无 | PhotoViewPicker（动态照片会被跳过） |
+| 文档/音视频选择 | 无 | DocumentViewPicker |
+| 图片/PDF/Office 元数据 | 无 | 只读源 URI，写沙箱副本 |
+| 端侧视觉 | 无 | Core Vision / Scan Kit，失败降级 |
+| 分享副本 | 无 | Share Kit |

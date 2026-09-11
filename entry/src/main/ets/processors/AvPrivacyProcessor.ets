@@ -8,6 +8,9 @@ import { BusinessError } from '@kit.BasicServicesKit';
 import { FileTypeRouter } from './FileTypeRouter';
 import { IsoBmffMetadataReader, IsoMetadataItem } from './IsoBmffMetadataReader';
 import { NativeMediaRemuxer, NativeRemuxResult } from './NativeMediaRemuxer';
+import { Mp3Metadata } from '../metadata/Mp3Metadata';
+import { FlacMetadata } from '../metadata/FlacMetadata';
+import { WavMetadata } from '../metadata/WavMetadata';
 
 /**
  * Privacy checker for audio/video containers. Video cleanup uses a native
@@ -156,11 +159,198 @@ export class AvPrivacyTool {
   }
 
   /**
+   * Preserves every MovingPhoto video track and encoded sample. Only bounded
+   * privacy-bearing moov values are overwritten in a sandbox copy. Remux is
+   * deliberately avoided here: rebuilding tracks drops vendor association
+   * metadata and makes system Gallery treat the asset as a plain video.
+   */
+  async sanitizeMovingPhotoComponent(uri: string): Promise<SanitizedFile> {
+    let outputPath: string = '';
+    let source: fileIo.File | undefined = undefined;
+    let target: fileIo.File | undefined = undefined;
+    try {
+      source = await fileIo.open(uri, fileIo.OpenMode.READ_ONLY);
+      const size: number = fileIo.statSync(source.fd).size;
+      if (size <= 0) throw new Error('EMPTY_MEDIA');
+      outputPath = this.tempFiles.createOutputPath('moving-photo-video.mp4', 'mp4');
+      target = await fileIo.open(outputPath,
+        fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
+      await fileIo.copyFile(source.fd, target.fd);
+      if (!IsoBmffMetadataReader.sanitizePrivacyMetadata(target.fd, size)) {
+        throw new Error('MOVING_PHOTO_CONTAINER_UNSUPPORTED');
+      }
+      fileIo.closeSync(target);
+      target = undefined;
+      fileIo.closeSync(source);
+      source = undefined;
+      const outputUri: string = fileUri.getUriFromPath(outputPath);
+      const verification: PrivacyScanResult = await this.verifyMovingPhotoVideo(outputUri);
+      if (verification.scanFailed || verification.findings.length > 0) {
+        throw new Error('MOVING_PHOTO_METADATA_REMAINS');
+      }
+      const sanitized = new SanitizedFile(outputPath, outputUri, verification,
+        'general.mpeg-4', 'video/mp4');
+      sanitized.fileKind = 'AUDIO_VIDEO';
+      sanitized.byteSize = fileIo.statSync(outputPath).size;
+      return sanitized;
+    } catch (error) {
+      if (outputPath.length > 0) await this.tempFiles.remove(outputPath);
+      throw error as Error;
+    } finally {
+      try {
+        if (target !== undefined) fileIo.closeSync(target);
+      } catch (_) {}
+      try {
+        if (source !== undefined) fileIo.closeSync(source);
+      } catch (_) {}
+    }
+  }
+
+  private async sanitizeTaggedAudio(uri: string): Promise<SanitizedFile> {
+    let outputPath: string = '';
+    let source: fileIo.File | undefined = undefined;
+    try {
+      source = await fileIo.open(uri, fileIo.OpenMode.READ_ONLY);
+      const size: number = fileIo.statSync(source.fd).size;
+      if (size <= 0) throw new Error('EMPTY_MEDIA');
+      const buffer: ArrayBuffer = new ArrayBuffer(size);
+      let readTotal: number = 0;
+      while (readTotal < size) {
+        const read: number = await fileIo.read(source.fd, buffer, {
+          offset: readTotal, length: size - readTotal
+        });
+        if (read <= 0) break;
+        readTotal += read;
+      }
+      if (readTotal !== size) throw new Error('AUDIO_SHORT_READ');
+      const bytes: Uint8Array = new Uint8Array(buffer, 0, readTotal);
+      let cleaned: Uint8Array;
+      let extension: string;
+      let mime: string;
+      let utd: string;
+      if (this.isMp3(uri) || Mp3Metadata.isMp3(bytes)) {
+        cleaned = Mp3Metadata.sanitize(bytes);
+        extension = 'mp3';
+        mime = 'audio/mpeg';
+        utd = 'general.mp3';
+      } else if (this.isFlac(uri) || FlacMetadata.isFlac(bytes)) {
+        cleaned = FlacMetadata.sanitize(bytes);
+        extension = 'flac';
+        mime = 'audio/flac';
+        utd = 'general.flac';
+      } else if (this.isWav(uri) || WavMetadata.isWav(bytes)) {
+        cleaned = WavMetadata.sanitize(bytes);
+        extension = 'wav';
+        mime = 'audio/wav';
+        utd = 'general.wav';
+      } else {
+        throw new Error('AUDIO_FORMAT_UNSUPPORTED');
+      }
+      outputPath = this.tempFiles.createOutputPath(`audio.${extension}`, extension);
+      let target: fileIo.File | undefined = undefined;
+      try {
+        target = await fileIo.open(outputPath,
+          fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
+        await fileIo.write(target.fd, cleaned.buffer.slice(cleaned.byteOffset,
+          cleaned.byteOffset + cleaned.byteLength));
+      } finally {
+        try {
+          if (target !== undefined) fileIo.closeSync(target);
+        } catch (_) {}
+      }
+      const outputUri: string = fileUri.getUriFromPath(outputPath);
+      const verification: PrivacyScanResult = await this.verifyTaggedAudio(outputUri, extension);
+      if (verification.scanFailed) {
+        throw new Error('METADATA_REMAINS');
+      }
+      const sanitized = new SanitizedFile(outputPath, outputUri, verification, utd, mime);
+      sanitized.fileKind = 'AUDIO_VIDEO';
+      sanitized.byteSize = fileIo.statSync(outputPath).size;
+      return sanitized;
+    } catch (error) {
+      if (outputPath.length > 0) await this.tempFiles.remove(outputPath);
+      const stage: string = (error as Error).message;
+      throw new Error(stage.startsWith('AUDIO_') ? stage : `AUDIO_${stage}`);
+    } finally {
+      try {
+        if (source !== undefined) fileIo.closeSync(source);
+      } catch (_) {}
+    }
+  }
+
+  private async verifyTaggedAudio(uri: string, extension: string): Promise<PrivacyScanResult> {
+    let source: fileIo.File | undefined = undefined;
+    const findings: PrivacyFinding[] = [];
+    try {
+      source = await fileIo.open(uri, fileIo.OpenMode.READ_ONLY);
+      const size: number = fileIo.statSync(source.fd).size;
+      if (size <= 8) {
+        const failed: PrivacyScanResult = this.result(uri, findings, [], false, false);
+        failed.scanFailed = true;
+        return failed;
+      }
+      const buffer: ArrayBuffer = new ArrayBuffer(Math.min(size, 256 * 1024));
+      const read: number = await fileIo.read(source.fd, buffer);
+      const bytes: Uint8Array = new Uint8Array(buffer, 0, Math.max(0, read));
+      if (extension === 'mp3' && bytes.length >= 3 &&
+        bytes[0] === 0x49 && bytes[1] === 0x44 && bytes[2] === 0x33) {
+        findings.push(this.tagFinding('av-ID3', 'AV_ID3', 'ID3'));
+      }
+      if (extension === 'flac' && FlacMetadata.inspect(bytes).vorbisCommentCount > 0) {
+        findings.push(this.tagFinding('av-FLAC_COMMENT', 'AV_FLAC_COMMENT', 'VorbisComment'));
+      }
+      if (extension === 'wav' && WavMetadata.inspect(bytes).listInfoCount > 0) {
+        findings.push(this.tagFinding('av-WAV_INFO', 'AV_WAV_INFO', 'LIST INFO'));
+      }
+    } catch (_) {
+      const failed: PrivacyScanResult = this.result(uri, findings, [], false, false);
+      failed.scanFailed = true;
+      return failed;
+    } finally {
+      try {
+        if (source !== undefined) fileIo.closeSync(source);
+      } catch (_) {}
+    }
+    const result: PrivacyScanResult = this.result(uri, findings, [], false, false);
+    result.mimeType = extension === 'mp3' ? 'audio/mpeg' :
+      (extension === 'flac' ? 'audio/flac' : 'audio/wav');
+    return result;
+  }
+
+  private tagFinding(id: string, subtype: string, label: string): PrivacyFinding {
+    const finding = new PrivacyFinding(id, subtype, RiskLevel.MEDIUM,
+      '包含音频标签', `${label} 元数据仍存在。`, '生成副本时删除', true, label);
+    finding.category = FindingCategory.METADATA;
+    return finding;
+  }
+
+  private isMp3(uri: string): boolean {
+    const normalized: string = uri.toLowerCase();
+    return normalized.indexOf('.mp3') >= 0 || normalized.indexOf('audio/mpeg') >= 0;
+  }
+
+  private isFlac(uri: string): boolean {
+    const normalized: string = uri.toLowerCase();
+    return normalized.indexOf('.flac') >= 0 || normalized.indexOf('audio/flac') >= 0;
+  }
+
+  private isWav(uri: string): boolean {
+    const normalized: string = uri.toLowerCase();
+    return normalized.indexOf('.wav') >= 0 || normalized.indexOf('audio/wav') >= 0 ||
+      normalized.indexOf('audio/x-wav') >= 0;
+  }
+
+  /**
    * Produces a new MP4 by copying encoded tracks only. Source-level container
    * metadata is deliberately not passed to AVMuxer. The source stays read-only
    * and the generated sandbox file is scanned again before it is returned.
    */
   async sanitize(uri: string, forMovingPhoto: boolean = false): Promise<SanitizedFile> {
+    // MP3 / FLAC / WAV have no system tag writer. Strip tags in place and
+    // keep only the encoded audio payload.
+    if (this.isMp3(uri) || this.isFlac(uri) || this.isWav(uri)) {
+      return await this.sanitizeTaggedAudio(uri);
+    }
     let outputPath: string = '';
     let input: fileIo.File | undefined = undefined;
     let output: fileIo.File | undefined = undefined;
@@ -373,9 +563,9 @@ export class AvPrivacyTool {
     const result: PrivacyScanResult = new PrivacyScanResult(uri, findings);
     result.capabilityWarnings = warnings;
     result.scanFailed = findings.length === 0 && warnings.length > 0;
-    // ISO-BMFF audio (M4A) can use the same encoded-track copy path. Other
-    // audio containers require their own tag/container writers.
-    result.readOnlyTool = !isVideo && !isM4aContent && !this.isM4a(uri);
+    // ISO-BMFF audio (M4A), MP3, FLAC and WAV can produce cleaned copies.
+    result.readOnlyTool = !isVideo && !isM4aContent && !this.isM4a(uri) &&
+      !this.isMp3(uri) && !this.isFlac(uri) && !this.isWav(uri);
     return result;
   }
 

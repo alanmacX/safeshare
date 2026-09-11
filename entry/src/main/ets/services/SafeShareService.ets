@@ -12,7 +12,7 @@ import { MovingPhotoPrivacyTool } from '../processors/MovingPhotoPrivacyProcesso
 import { FileKind, FileTypeRouter } from '../processors/FileTypeRouter';
 import { FileSignatureRouter } from '../processors/FileSignatureRouter';
 import { MetadataPolicy } from '../metadata/MetadataPolicy';
-import { MediaCapability, MediaCapabilityRegistry } from '../metadata/MediaCapabilityRegistry';
+import { MediaCapability, MediaCapabilityRegistry, SupportGrade } from '../metadata/MediaCapabilityRegistry';
 import { filePreview } from '@kit.PreviewKit';
 
 import { hilog } from '@kit.PerformanceAnalysisKit';
@@ -35,8 +35,6 @@ export class SafeShareService {
   private powerpointTool: OoxmlFamilyTool;
   private avTool: AvPrivacyTool;
   private movingPhotoTool: MovingPhotoPrivacyTool;
-  private movingPhotoUris: string[] = [];
-  private localMovingPhotos: Map<string, SanitizedFile> = new Map();
   private capabilitiesByUri: Map<string, MediaCapability> = new Map();
   private sender: ShareSender;
   private tempFiles: TempFileManager;
@@ -84,11 +82,22 @@ export class SafeShareService {
     return FileTypeRouter.detect(uri) !== FileKind.UNKNOWN;
   }
 
+  /** Detection-only gate used by the page layer before starting a batch. */
+  isMovingPhotoUri(uri: string): Promise<boolean> {
+    return this.movingPhotoTool.isMovingPhoto(uri);
+  }
+
   async resolveKind(uri: string, utd: string = ''): Promise<FileKind> {
-    if (this.localMovingPhoto(uri) !== undefined) return FileKind.IMAGE;
+    // MovingPhoto is out of product scope. Detect early so batch UI can skip
+    // the asset instead of entering a half-supported image pipeline.
     if (utd === 'openharmony.moving-photo' || await this.movingPhotoTool.isMovingPhoto(uri)) {
-      this.rememberMovingPhoto(uri);
-      return FileKind.IMAGE;
+      throw new Error('MOVING_PHOTO_UNSUPPORTED');
+    }
+    // Cheap extension pass first: avoid opening the file again for JPEG/PNG
+    // etc. when the suffix is already unambiguous (PhotoViewPicker shares).
+    const byExtension: FileKind = FileTypeRouter.detect(uri, '');
+    if (byExtension !== FileKind.UNKNOWN) {
+      return byExtension;
     }
     // URI path fragments are provider implementation details and may contain
     // a misleading suffix. Prefer the opened file's signature/display name;
@@ -104,17 +113,9 @@ export class SafeShareService {
     resolvedKind: FileKind = FileKind.UNKNOWN): Promise<PrivacyScanResult> {
     const kind: FileKind = resolvedKind === FileKind.UNKNOWN ? await this.resolveKind(uri, utd) : resolvedKind;
     if (kind === FileKind.IMAGE) {
-      const local: SanitizedFile | undefined = this.localMovingPhoto(uri);
-      if (local !== undefined) {
-        const result: PrivacyScanResult = await this.movingPhotoTool.scanLocal(uri, local.cleanupPaths);
-        result.fileKind = FileKind.IMAGE;
-        return this.applyCapability(result, FileKind.IMAGE);
-      }
-      if (this.isKnownMovingPhoto(uri) || await this.movingPhotoTool.isMovingPhoto(uri)) {
-        this.rememberMovingPhoto(uri);
-        const result: PrivacyScanResult = await this.movingPhotoTool.scan(uri);
-        result.fileKind = FileKind.IMAGE;
-        return this.applyCapability(result, FileKind.IMAGE);
+      // resolveKind already sniffed the URI; avoid a second probe on batch.
+      if (utd === 'openharmony.moving-photo') {
+        this.movingPhotoTool.assertSupported();
       }
       const result: PrivacyScanResult = await this.imageProcessor.scan(uri);
       result.fileKind = FileKind.IMAGE;
@@ -156,18 +157,8 @@ export class SafeShareService {
     const kind: FileKind = resolvedKind === FileKind.UNKNOWN ? await this.resolveKind(uri, utd) : resolvedKind;
     this.assertSupportedOperations(uri, actions, policy, pdfWatermark);
     if (kind === FileKind.IMAGE) {
-      const local: SanitizedFile | undefined = this.localMovingPhoto(uri);
-      if (local !== undefined) {
-        const file: SanitizedFile = await this.movingPhotoTool.sanitizeLocal(local.cleanupPaths, actions, policy);
-        this.registerLocalMovingPhoto(file);
-        return file;
-      }
-      if (this.isKnownMovingPhoto(uri) || utd === 'openharmony.moving-photo' ||
-        await this.movingPhotoTool.isMovingPhoto(uri)) {
-        this.rememberMovingPhoto(uri);
-        const file: SanitizedFile = await this.movingPhotoTool.sanitize(uri, actions, policy);
-        this.registerLocalMovingPhoto(file);
-        return file;
+      if (utd === 'openharmony.moving-photo') {
+        this.movingPhotoTool.assertSupported();
       }
       const file: SanitizedFile = await this.imageProcessor.sanitize(uri, actions, policy);
       file.fileKind = FileKind.IMAGE;
@@ -205,7 +196,8 @@ export class SafeShareService {
       const kind: FileKind = suppliedKind === FileKind.UNKNOWN ? await this.resolveKind(uris[index], utd) : suppliedKind;
       resolvedKinds.push(kind);
       const readOnly: boolean = index < readOnlyByFile.length ? readOnlyByFile[index] :
-        (kind === FileKind.AUDIO_VIDEO && FileTypeRouter.isAudioUri(uris[index]));
+        (kind === FileKind.AUDIO_VIDEO && FileTypeRouter.isAudioUri(uris[index]) &&
+          !this.isLosslessAudioExtension(FileTypeRouter.extensionOf(uris[index])));
       if (kind !== FileKind.UNKNOWN && !readOnly) supportedTotal++;
     }
     let completed: number = 0;
@@ -228,6 +220,9 @@ export class SafeShareService {
           await this.sanitizeFile(uris[index], actions, filePolicy, utd, kind, fileWatermark);
         flowLog('sanitize_file_done', `i=${index}`);
         sanitized.sourceIndex = index;
+        // Protect until share dismiss / explicit discard so a new share
+        // intent cannot wipe the open share sheet's backing files.
+        this.protectSanitizedPaths(sanitized);
         files.push(sanitized);
         completed++;
         if (onProgress !== undefined) {
@@ -243,6 +238,9 @@ export class SafeShareService {
       // Stage-coded failures keep their specific message so the UI can show
       // the honest cause (video pipeline codes, PDF revision failures).
       if (stage.startsWith('VIDEO_') || stage.startsWith('AUDIO_') || stage.startsWith('PDF_COPY_FAILED:') ||
+        stage.startsWith('MOVING_PHOTO_') || stage === 'GIF_VISUAL_EDIT_UNSUPPORTED' ||
+        stage === 'MULTI_FRAME_IMAGE' || stage === 'UNSUPPORTED_IMAGE_OUTPUT' ||
+        stage === 'FACE_VERIFY_UNAVAILABLE' ||
         stage === 'LEGACY_OFFICE_FORMAT') throw error as Error;
       throw new Error('Unable to create all verified sanitized copies.');
     }
@@ -267,11 +265,12 @@ export class SafeShareService {
   }
 
   async dispose(): Promise<void> {
-    const files: SanitizedFile[] = this.uniqueLocalMovingPhotos();
-    for (let index: number = 0; index < files.length; index++) {
-      await this.removeSanitizedFile(files[index]);
-    }
     await this.imageProcessor.dispose();
+  }
+
+  private isLosslessAudioExtension(extension: string): boolean {
+    return extension === 'mp3' || extension === 'm4a' || extension === 'flac' ||
+      extension === 'wav';
   }
 
   private ooxmlToolFor(kind: FileKind): OoxmlFamilyTool {
@@ -280,32 +279,7 @@ export class SafeShareService {
     return this.wordTool;
   }
 
-  private isKnownMovingPhoto(uri: string): boolean {
-    return this.movingPhotoUris.indexOf(uri) >= 0;
-  }
-
-  private rememberMovingPhoto(uri: string): void {
-    if (!this.isKnownMovingPhoto(uri)) this.movingPhotoUris.push(uri);
-  }
-
-  private registerLocalMovingPhoto(file: SanitizedFile): void {
-    this.localMovingPhotos.set(file.uri, file);
-    try { this.localMovingPhotos.set(decodeURIComponent(file.uri), file); } catch (_) {}
-    const paths: string[] = file.cleanupPaths.length > 0 ? file.cleanupPaths : [file.path];
-    for (let index: number = 0; index < paths.length; index++) this.tempFiles.protect(paths[index]);
-  }
-
-  private localMovingPhoto(uri: string): SanitizedFile | undefined {
-    const exact: SanitizedFile | undefined = this.localMovingPhotos.get(uri);
-    if (exact !== undefined) return exact;
-    try { return this.localMovingPhotos.get(decodeURIComponent(uri)); } catch (_) { return undefined; }
-  }
-
   private async removeSanitizedFile(file: SanitizedFile): Promise<void> {
-    const keys: string[] = Array.from(this.localMovingPhotos.keys());
-    for (let index: number = 0; index < keys.length; index++) {
-      if (this.localMovingPhotos.get(keys[index]) === file) this.localMovingPhotos.delete(keys[index]);
-    }
     const paths: string[] = file.cleanupPaths.length > 0 ? file.cleanupPaths : [file.path];
     for (let index: number = 0; index < paths.length; index++) {
       this.tempFiles.release(paths[index]);
@@ -313,19 +287,40 @@ export class SafeShareService {
     }
   }
 
-  private uniqueLocalMovingPhotos(): SanitizedFile[] {
-    const result: SanitizedFile[] = [];
-    this.localMovingPhotos.forEach((file: SanitizedFile) => {
-      if (result.indexOf(file) < 0) result.push(file);
-    });
-    return result;
+  private protectSanitizedPaths(file: SanitizedFile): void {
+    const paths: string[] = file.cleanupPaths.length > 0 ? file.cleanupPaths : [file.path];
+    for (let index: number = 0; index < paths.length; index++) {
+      this.tempFiles.protect(paths[index]);
+    }
   }
 
   private applyCapability(result: PrivacyScanResult, kind: FileKind): PrivacyScanResult {
+    // Keep the scanner's concrete format when ImageSource omitted mime —
+    // collapsing to image-unknown disables watermark/face/QR and breaks previews.
+    let effectiveMime: string = result.mimeType;
+    if (kind === FileKind.IMAGE && effectiveMime.length === 0 && result.formatId.length > 0 &&
+      result.formatId !== 'image-unknown') {
+      if (result.formatId === 'jpeg') effectiveMime = 'image/jpeg';
+      else if (result.formatId === 'png') effectiveMime = 'image/png';
+      else if (result.formatId === 'webp' || result.formatId === 'webp-animated') effectiveMime = 'image/webp';
+      else if (result.formatId === 'gif') effectiveMime = 'image/gif';
+      else if (result.formatId === 'heif' || result.formatId === 'heif-sequence') effectiveMime = 'image/heif';
+      else if (result.formatId === 'tiff') effectiveMime = 'image/tiff';
+      else if (result.formatId === 'dng') effectiveMime = 'image/x-adobe-dng';
+      else if (result.formatId === 'bmp') effectiveMime = 'image/bmp';
+      if (effectiveMime.length > 0) result.mimeType = effectiveMime;
+    }
     const multiFrame: boolean = result.formatId === 'gif' || result.formatId === 'webp-animated' ||
       result.formatId === 'heif-sequence';
-    const capability: MediaCapability = MediaCapabilityRegistry.forResult(kind, result.mimeType,
+    let capability: MediaCapability = MediaCapabilityRegistry.forResult(kind, effectiveMime,
       result.isMovingPhoto, multiFrame, result.readOnlyTool);
+    if (kind === FileKind.IMAGE && capability.id === 'image-unknown' &&
+      result.textWatermarkSupported && result.metadataCleanSupported) {
+      // Scanner already enabled concrete still-image capabilities; do not
+      // erase them just because the service layer saw an empty mime.
+      capability = new MediaCapability(result.formatId || 'jpeg', result.formatLabel || 'JPEG',
+        SupportGrade.IMPLEMENTED, true, true, true, true, true, true, true);
+    }
     result.formatId = capability.id;
     result.formatLabel = capability.label;
     result.metadataCleanSupported = capability.metadataClean;
@@ -349,10 +344,15 @@ export class SafeShareService {
     const capability: MediaCapability | undefined = this.capabilitiesByUri.get(uri);
     if (capability === undefined) return;
     if (!capability.metadataClean) throw new Error('FORMAT_METADATA_CLEAN_UNSUPPORTED');
-    if (policy.purposeWatermark.trim().length > 0 && !capability.textWatermark) {
+    // Photo watermark is gated by the UI toggle for all still-image sessions
+    // (original release behavior). Capability tables must not revoke JPEG/PNG
+    // watermark just because mime detection collapsed to image-unknown.
+    if (policy.purposeWatermark.trim().length > 0 && capability.id !== 'jpeg' &&
+      capability.id !== 'png' && capability.id !== 'webp' && !capability.textWatermark) {
       throw new Error('FORMAT_TEXT_WATERMARK_UNSUPPORTED');
     }
-    if (policy.imageWatermarkUri.length > 0 && !capability.imageWatermark) {
+    if (policy.imageWatermarkUri.length > 0 && capability.id !== 'jpeg' &&
+      capability.id !== 'png' && capability.id !== 'webp' && !capability.imageWatermark) {
       throw new Error('FORMAT_IMAGE_WATERMARK_UNSUPPORTED');
     }
     if (pdfWatermark !== undefined && !capability.textWatermark) {

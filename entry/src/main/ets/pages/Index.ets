@@ -14,6 +14,8 @@ import { SafeShareService } from '../services/SafeShareService';
 import { RedactionPixels } from '../privacy/RedactionPixels';
 import { runRedaction } from '../privacy/RedactionTask';
 import { MetadataMode, MetadataPolicy, MetadataPolicyStore, MetadataReplacement } from '../metadata/MetadataPolicy';
+import { MotionHandService, HandSide } from '../services/MotionHandService';
+import { abilityAccessCtrl, PermissionRequestResult, Permissions } from '@kit.AbilityKit';
 import { BreakpointWatcher, DeviceBreakpoint } from '../ui/Responsive';
 import { TutorialOverlay } from './TutorialOverlay';
 import { preferences } from '@kit.ArkData';
@@ -30,6 +32,24 @@ enum PageStatus {
   SANITIZING = 'SANITIZING',
   READY = 'READY',
   ERROR = 'ERROR'
+}
+
+class SupportTypeItem {
+  icon: Resource = $r('sys.symbol.doc_text');
+  title: string = '';
+  detail: string = '';
+  note: string = '';
+  badge: string = '';
+  badgeOk: boolean = false;
+
+  constructor(icon: Resource, title: string, detail: string, note: string, badge: string, badgeOk: boolean) {
+    this.icon = icon;
+    this.title = title;
+    this.detail = detail;
+    this.note = note;
+    this.badge = badge;
+    this.badgeOk = badgeOk;
+  }
 }
 
 enum FeatureMode {
@@ -218,6 +238,20 @@ struct Index {
   @State expandedFoldInnerDisplay: boolean = false;
   // First-launch tutorial; re-openable from the settings menu.
   @State showTutorial: boolean = false;
+  // Files-home “supported types” sheet.
+  @State supportListVisible: boolean = false;
+  // Generate/share FAB side. 'auto' follows Multimodal Awareness Kit
+  // (operatingHandChanged / holdingHandChanged · 智感握姿) when the device
+  // supports it; otherwise the last known or manual side is used.
+  @State fabHand: string = 'right';
+  @State fabHandMode: string = 'auto';
+  // Layout uses a fixed BottomEnd anchor + animated translate so left/right
+  // switches slide instead of jumping when Stack alignment flips.
+  @State fabOnLeft: boolean = false;
+  @State detectedHand: string = '';
+  // True when motion.on() actually subscribed (device + permission OK).
+  @State motionHandAvailable: boolean = false;
+  private motionHand: MotionHandService = new MotionHandService();
   // PDF watermark — session-scoped and fully independent from the photo
   // watermark settings (审核要求：仅 PDF 可用，不与照片水印混用).
   @State pdfWatermarkOn: boolean = false;
@@ -240,6 +274,9 @@ struct Index {
     this.defaultsReady = this.loadMetadataDefaults();
     this.loadOnboardingFlag();
     this.watchStatusBarContrast();
+    this.startMotionHandWatch().catch(() => {
+      this.flowLog('motion_hand', 'start_failed');
+    });
     this.breakpointWatcher =
       new BreakpointWatcher(this.getUIContext());
     this.breakpointWatcher.onChange((breakpoint: DeviceBreakpoint) => {
@@ -259,6 +296,7 @@ struct Index {
   }
 
   aboutToDisappear(): void {
+    this.motionHand.stop();
     if (this.darkModeListener !== undefined) {
       try {
         this.darkModeListener.off('change');
@@ -371,6 +409,32 @@ struct Index {
     if (policy.watermarkColor !== '#FFFFFF' && policy.watermarkColor !== '#000000') {
       this.customWatermarkColor = policy.watermarkColor;
     }
+    try {
+      const store: preferences.Preferences =
+        await preferences.getPreferences(context, 'privacy_defaults');
+      const mode: preferences.ValueType = await store.get('fab_hand_mode', 'auto');
+      const modeValue: string = mode.toString();
+      this.fabHandMode = modeValue === 'left' || modeValue === 'right' || modeValue === 'auto' ?
+        modeValue : 'auto';
+      const hand: preferences.ValueType = await store.get('fab_hand', 'right');
+      const handValue: string = hand.toString();
+      this.fabHand = handValue === 'left' ? 'left' : 'right';
+      this.fabOnLeft = this.fabHand === 'left';
+    } catch (_) {
+    }
+  }
+
+  private async saveFabHandPrefs(): Promise<void> {
+    try {
+      const context: common.UIAbilityContext =
+        this.getUIContext().getHostContext() as common.UIAbilityContext;
+      const store: preferences.Preferences =
+        await preferences.getPreferences(context, 'privacy_defaults');
+      await store.put('fab_hand_mode', this.fabHandMode);
+      await store.put('fab_hand', this.fabHand);
+      await store.flush();
+    } catch (_) {
+    }
   }
 
   private currentMetadataPolicy(): MetadataPolicy {
@@ -419,17 +483,23 @@ struct Index {
       policy.purposeWatermark = '';
       policy.imageWatermarkUri = '';
     }
-    // A MovingPhoto remains a composite photo+video asset. Its first release
-    // supports metadata cleanup only, so never pass still-image watermark
-    // settings into that dedicated pipeline. The scan result also surfaces
-    // this limitation to the user instead of silently flattening the asset.
+    // MovingPhoto is unsupported. Do not pass still-image watermark settings
+    // into any residual path; capability gates already block visual edits.
     if (sourceIndex < this.scanResults.length && this.scanResults[sourceIndex].isMovingPhoto) {
       policy.purposeWatermark = '';
       policy.imageWatermarkUri = '';
     }
     if (sourceIndex < this.scanResults.length) {
-      if (!this.scanResults[sourceIndex].textWatermarkSupported) policy.purposeWatermark = '';
-      if (!this.scanResults[sourceIndex].imageWatermarkSupported) policy.imageWatermarkUri = '';
+      // Only strip watermark for formats whose sanitizer cannot re-encode
+      // pixels (GIF/HEIF/TIFF/…). JPEG/PNG/WebP keep the user's toggle.
+      const result: PrivacyScanResult = this.scanResults[sourceIndex];
+      const metadataOnly: boolean = result.formatId === 'gif' || result.formatId === 'heif' ||
+        result.formatId === 'heif-sequence' || result.formatId === 'tiff' || result.formatId === 'dng' ||
+        result.formatId === 'bmp' || result.formatId === 'webp-animated';
+      if (metadataOnly) {
+        policy.purposeWatermark = '';
+        policy.imageWatermarkUri = '';
+      }
     }
     policy.mode = MetadataMode.CUSTOM;
     policy.preserveCaptureTime = false;
@@ -549,7 +619,8 @@ struct Index {
 
   private async syncPdfPreview(): Promise<void> {
     const uri: string = this.currentPreviewUri();
-    const isPdf: boolean = this.statusNotReady() && this.trackedFileKind === FileKind.PDF;
+    const isPdf: boolean = this.trackedFileKind === FileKind.PDF;
+    // Render both source (RESULT) and sanitized copy (READY + safe segment).
     if (!isPdf || uri.length === 0 || uri === this.pdfPreviewUri) {
       if (!isPdf && this.pdfPreviewPixelMap !== undefined) {
         this.pdfPreviewPixelMap.release().catch(() => {
@@ -568,6 +639,10 @@ struct Index {
         return;
       }
       if (map !== undefined) {
+        if (this.pdfPreviewPixelMap !== undefined) {
+          this.pdfPreviewPixelMap.release().catch(() => {
+          });
+        }
         this.pdfPreviewPixelMap = map;
       }
       this.flowLog('pdf_preview', `rendered=${map !== undefined ? 1 : 0}`);
@@ -670,6 +745,90 @@ struct Index {
     this.showSettingsSheet = true;
   }
 
+  private async startMotionHandWatch(): Promise<void> {
+    // DETECT_GESTURE is user_grant: must request at runtime or motion.on throws 201.
+    const granted: boolean = await this.ensureDetectGesturePermission();
+    if (!granted) {
+      this.motionHandAvailable = false;
+      this.flowLog('motion_hand', 'permission_denied');
+      return;
+    }
+    const ok: boolean = this.motionHand.start((hand: HandSide) => {
+      this.detectedHand = hand;
+      this.motionHandAvailable = true;
+      this.flowLog('motion_hand', `side=${hand} mode=${this.fabHandMode}`);
+      if (this.fabHandMode === 'auto') {
+        this.applyFabSide(hand, true);
+      }
+    });
+    this.motionHandAvailable = ok;
+    this.flowLog('motion_hand', `subscribed=${ok ? 1 : 0}`);
+    if (!ok && this.fabHandMode === 'auto') {
+      // Device cannot report a hand (801 / emulator / permission). Keep the
+      // preferred auto mode in prefs; only this session falls back to LTR.
+      this.flowLog('motion_hand', 'session_fallback_right');
+      this.fabHand = 'right';
+      this.fabOnLeft = false;
+    }
+  }
+
+  private applyFabSide(hand: HandSide, animate: boolean): void {
+    const onLeft: boolean = hand === 'left';
+    if (!animate) {
+      this.fabHand = hand;
+      this.fabOnLeft = onLeft;
+      return;
+    }
+    // Drive only @State inside animateTo; do not also attach .animation()
+    // on the Button or the translate may never commit.
+    this.getUIContext().animateTo({
+      duration: 420,
+      curve: Curve.FastOutSlowIn
+    }, () => {
+      this.fabHand = hand;
+      this.fabOnLeft = onLeft;
+    });
+  }
+
+  private async ensureDetectGesturePermission(): Promise<boolean> {
+    try {
+      const context: common.UIAbilityContext =
+        this.getUIContext().getHostContext() as common.UIAbilityContext;
+      const permission: Permissions = 'ohos.permission.DETECT_GESTURE';
+      const manager: abilityAccessCtrl.AtManager = abilityAccessCtrl.createAtManager();
+      const tokenId: number = context.applicationInfo.accessTokenId;
+      const current: abilityAccessCtrl.GrantStatus = await manager.checkAccessToken(tokenId, permission);
+      if (current === abilityAccessCtrl.GrantStatus.PERMISSION_GRANTED) return true;
+      const result: PermissionRequestResult =
+        await manager.requestPermissionsFromUser(context, [permission]);
+      return result.authResults.length > 0 &&
+        result.authResults[0] === abilityAccessCtrl.GrantStatus.PERMISSION_GRANTED;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /** FAB side used by layout: manual mode wins; auto uses last detected hand. */
+  private effectiveFabHand(): string {
+    if (this.fabHandMode === 'left') return 'left';
+    if (this.fabHandMode === 'right') return 'right';
+    if (this.fabOnLeft) return 'left';
+    return 'right';
+  }
+
+  /** Prefer method call over a getter so ArkUI rebuilds when @State changes. */
+  private isLeftHand(): boolean {
+    return this.effectiveFabHand() === 'left';
+  }
+
+  /** Horizontal travel from right edge to left edge inside the scan stack. */
+  private fabTravelX(): number {
+    const width: number = this.viewportWidth > 80 ? this.viewportWidth : 390;
+    // Keep the button inside the content padding (20) and its 4px edge margin.
+    const travel: number = width - 20 - 56 - 4 - 4;
+    return travel > 0 ? -travel : 0;
+  }
+
   private animateSettingsTo(page: string): void {
     this.getUIContext().animateTo({ duration: 240, curve: Curve.Friction }, () => {
       this.settingsPage = page;
@@ -740,15 +899,30 @@ struct Index {
       imageFilter.mimeTypeArray = ['image/*'];
       options.mimeTypeFilter = imageFilter;
       options.maxSelectNumber = 50;
+      try {
+        options.globalMovingPhotoState = photoAccessHelper.MovingPhotoBadgeStateType.MOVING_PHOTO_DISABLED;
+      } catch (_) {
+        // Older picker builds ignore this option.
+      }
       const viewPicker: photoAccessHelper.PhotoViewPicker = new photoAccessHelper.PhotoViewPicker();
       const result: photoAccessHelper.PhotoSelectResult = await viewPicker.select(options);
       if (result.photoUris.length > 0) {
-        const imageUris: string[] = this.imageUrisOnly(result.photoUris);
-        if (imageUris.length === 0) {
-          this.getUIContext().getPromptAction().showToast({ message: '请选择图片，视频不会进入照片处理' });
+        // Leave home immediately so a 50-photo batch does not look frozen.
+        this.enterScanLoading(result.photoUris.length === 1 ?
+          '正在读取照片…' : `正在读取 ${result.photoUris.length} 张照片…`);
+        const picked: string[] = await this.supportedImageUris(result.photoUris);
+        if (picked.length === 0) {
+          this.getUIContext().getPromptAction().showToast({
+            message: result.photoUris.length > 0 && picked.length === 0 ?
+              '暂不支持动态照片，请选择普通静态图片' : '请选择图片，视频不会进入照片处理'
+          });
+          this.status = PageStatus.HOME;
           return;
         }
-        await this.startScan(imageUris);
+        if (picked.length < result.photoUris.length) {
+          this.getUIContext().getPromptAction().showToast({ message: '已跳过动态照片，仅处理静态图片' });
+        }
+        await this.startScan(picked);
       }
     } catch (_) {
       this.message = '未能读取所选图片，请重新选择。';
@@ -841,6 +1015,24 @@ struct Index {
     const images: string[] = [];
     for (let index: number = 0; index < uris.length; index++) {
       if (this.getService().kindOf(uris[index]) === FileKind.IMAGE) images.push(uris[index]);
+    }
+    return images;
+  }
+
+  /** Drops MovingPhoto assets so they never enter scan/sanitize. */
+  private async supportedImageUris(uris: string[]): Promise<string[]> {
+    const images: string[] = [];
+    for (let index: number = 0; index < uris.length; index++) {
+      const uri: string = uris[index];
+      if (this.getService().kindOf(uri) !== FileKind.IMAGE) continue;
+      let moving: boolean = false;
+      try {
+        moving = await this.getService().isMovingPhotoUri(uri);
+      } catch (_) {
+        moving = false;
+      }
+      if (moving) continue;
+      images.push(uri);
     }
     return images;
   }
@@ -944,6 +1136,23 @@ struct Index {
     return this.currentFileKind() === FileKind.AUDIO_VIDEO;
   }
 
+  private isAudioOnlySession(): boolean {
+    if (!this.isAvSession()) return false;
+    if (FileTypeRouter.isAudioUri(this.currentPreviewUri())) return true;
+    return this.currentMediaMimeType().startsWith('audio/');
+  }
+
+  private isLosslessAudioExtension(extension: string): boolean {
+    return extension === 'mp3' || extension === 'm4a' || extension === 'flac' ||
+      extension === 'wav';
+  }
+
+  private fabEnabled(): boolean {
+    if (this.status === PageStatus.READY) return this.sanitizedFiles.length > 0;
+    if (this.status === PageStatus.RESULT) return this.hasSanitizableFiles();
+    return false;
+  }
+
   private isCurrentFileReadOnly(): boolean {
     if (this.previewIndex < this.scanResults.length) {
       return this.scanResults[this.previewIndex].readOnlyTool;
@@ -956,6 +1165,20 @@ struct Index {
       if (this.scanResults[index].isMovingPhoto) return true;
     }
     return false;
+  }
+
+  private currentFaceQrSupported(): boolean {
+    if (this.previewIndex >= this.scanResults.length) return false;
+    const result: PrivacyScanResult = this.scanResults[this.previewIndex];
+    return result.faceSupported || result.qrSupported;
+  }
+
+  /** Pixel watermarks require a re-encode path; metadata-only formats strip them. */
+  private currentSupportsPixelWatermark(): boolean {
+    if (this.previewIndex >= this.scanResults.length) return true;
+    const id: string = this.scanResults[this.previewIndex].formatId;
+    return !(id === 'gif' || id === 'heif' || id === 'heif-sequence' ||
+      id === 'tiff' || id === 'dng' || id === 'bmp' || id === 'webp-animated');
   }
 
   private currentTextWatermarkSupported(): boolean {
@@ -1002,8 +1225,11 @@ struct Index {
         (index < this.resolvedFileKinds.length ? this.resolvedFileKinds[index] :
           FileTypeRouter.detect(this.selectedUris[index], this.selectedUtds[index] ?? ''));
       const readOnly: boolean = index < this.scanResults.length ? this.scanResults[index].readOnlyTool :
-        (kind === FileKind.AUDIO_VIDEO && FileTypeRouter.isAudioUri(this.selectedUris[index]));
-      if (kind !== FileKind.UNKNOWN && !readOnly && !this.watermarkUnsupportedAt(index)) count++;
+        (kind === FileKind.AUDIO_VIDEO && FileTypeRouter.isAudioUri(this.selectedUris[index]) &&
+          !this.isLosslessAudioExtension(FileTypeRouter.extensionOf(this.selectedUris[index])));
+      const scanFailed: boolean = index < this.scanResults.length ? this.scanResults[index].scanFailed : false;
+      if (kind !== FileKind.UNKNOWN && !readOnly && !scanFailed &&
+        !this.watermarkUnsupportedAt(index)) count++;
     }
     return count;
   }
@@ -1029,6 +1255,15 @@ struct Index {
     return this.featureMode === FeatureMode.WATERMARK ? '照片' : '图片';
   }
 
+  /** Jump to the scan page with an immediate loading card (no silent home wait). */
+  private enterScanLoading(message: string): void {
+    this.ensureScanPage();
+    this.message = message;
+    this.getUIContext().animateTo({ duration: 160, curve: Curve.EaseOut }, () => {
+      this.status = PageStatus.SCANNING;
+    });
+  }
+
   private async startScan(uris: string[], utds: string[] = []): Promise<void> {
     if (uris.length === 0) {
       return;
@@ -1040,7 +1275,13 @@ struct Index {
     // page on the loading card forever.
     const scanKey: string = uris.join('|');
     const now: number = Date.now();
-    if (this.scanInFlight || (scanKey === this.lastScanKey && now - this.lastScanStart < 800)) {
+    // Dedup double-share callbacks; do not drop a call that already flipped
+    // the page into SCANNING (that left the spinner forever).
+    if (this.scanInFlight) {
+      return;
+    }
+    if (scanKey === this.lastScanKey && now - this.lastScanStart < 800 &&
+      this.status !== PageStatus.SCANNING) {
       return;
     }
     this.lastScanKey = scanKey;
@@ -1057,17 +1298,36 @@ struct Index {
 
   private async runScan(uris: string[], utds: string[] = []): Promise<void> {
     const operation: number = ++this.operationVersion;
-    this.ensureScanPage();
+    this.enterScanLoading(uris.length === 1 ? '正在准备检查…' : `正在准备 ${uris.length} 个文件…`);
     this.discardOutputs(uris);
     this.clearRedactedPreviews();
     this.selectedUris = uris.slice(0, 50);
     this.selectedUtds = utds.slice(0, this.selectedUris.length);
     while (this.selectedUtds.length < this.selectedUris.length) this.selectedUtds.push('');
     this.resolvedFileKinds = [];
+    const keptUris: string[] = [];
+    const keptUtds: string[] = [];
     for (let kindIndex: number = 0; kindIndex < this.selectedUris.length; kindIndex++) {
-      this.resolvedFileKinds.push(await this.getService().resolveKind(this.selectedUris[kindIndex],
-        this.selectedUtds[kindIndex]));
+      this.message = uris.length === 1 ? '正在识别文件类型…' :
+        `正在识别文件类型 ${kindIndex + 1}/${this.selectedUris.length}…`;
+      try {
+        const kind: FileKind = await this.getService().resolveKind(this.selectedUris[kindIndex],
+          this.selectedUtds[kindIndex]);
+        keptUris.push(this.selectedUris[kindIndex]);
+        keptUtds.push(this.selectedUtds[kindIndex]);
+        this.resolvedFileKinds.push(kind);
+      } catch (_) {
+        // MOVING_PHOTO_UNSUPPORTED and unreadable assets are excluded up front.
+      }
+      if (operation !== this.operationVersion) return;
     }
+    if (keptUris.length === 0) {
+      this.message = '所选文件暂不支持处理，请选择普通静态图片、PDF、Office 或音视频';
+      this.status = PageStatus.ERROR;
+      return;
+    }
+    this.selectedUris = keptUris;
+    this.selectedUtds = keptUtds;
     this.selectedUri = this.selectedUris[0];
     this.findings = [];
     this.refreshDerivedFindings();
@@ -1155,6 +1415,8 @@ struct Index {
       }
       this.findings = allFindings;
       this.refreshDerivedFindings();
+      // Empty metadata list must not leave an empty expandable shell.
+      this.showMetadataDetails = this.visibleMetadataFindings().length > 0;
       hilog.info(0x8801, 'SafeShareUI', `fm=${this.featureMode} n=${allFindings.length} metaN=${allFindings.filter((f: PrivacyFinding) => f.category === FindingCategory.METADATA).length}`);
       const warnings: string[] = [];
       for (let resultIndex: number = 0; resultIndex < this.scanResults.length; resultIndex++) {
@@ -1191,9 +1453,12 @@ struct Index {
   }
 
   private async createSafeCopy(): Promise<void> {
-    if (this.status === PageStatus.SANITIZING) {
-      // A run is already in flight; a second tap must not start a competing
-      // pipeline over the same source files.
+    if (this.status === PageStatus.SANITIZING || this.status === PageStatus.SCANNING) {
+      // Never start sanitize while a scan is still writing scanResults —
+      // that aborted the scan and built a policy from empty findings.
+      return;
+    }
+    if (this.status !== PageStatus.RESULT) {
       return;
     }
     if (!this.hasSanitizableFiles()) {
@@ -1252,16 +1517,31 @@ struct Index {
           (this.featureMode === FeatureMode.WATERMARK &&
             !result.textWatermarkSupported && !result.imageWatermarkSupported));
       this.flowLog('ui_sanitize_begin');
+      // PDF watermark applies to every PDF in the batch whenever the user
+      // turned the card on — not only when the preview pane is on a PDF.
       const pdfWatermark: PdfWatermarkOptions | undefined =
-        this.trackedFileKind === FileKind.PDF ? this.pdfWatermarkRequest() : undefined;
+        this.pdfWatermarkOn && this.pdfWatermarkText.trim().length > 0 &&
+          this.trackedFileKind === FileKind.PDF ? this.pdfWatermarkRequest() : undefined;
+      let anyPdfWatermark: PdfWatermarkOptions | undefined = pdfWatermark;
+      if (anyPdfWatermark === undefined && this.pdfWatermarkOn &&
+        this.pdfWatermarkText.trim().length > 0) {
+        for (let kindIndex: number = 0; kindIndex < this.resolvedFileKinds.length; kindIndex++) {
+          if (this.resolvedFileKinds[kindIndex] === FileKind.PDF ||
+            (kindIndex < this.scanResults.length &&
+              this.scanResults[kindIndex].fileKind === FileKind.PDF)) {
+            anyPdfWatermark = this.pdfWatermarkRequest();
+            break;
+          }
+        }
+      }
       this.flowLog('pdf_wm_request',
         `on=${this.pdfWatermarkOn ? 1 : 0} text=${this.pdfWatermarkText.trim().length > 0 ? 1 : 0} ` +
-        `send=${pdfWatermark !== undefined ? 1 : 0}`);
+        `send=${anyPdfWatermark !== undefined ? 1 : 0}`);
       const files: SanitizedFile[] = await this.getService().sanitizeFiles(this.selectedUris, actionsByFile,
         this.currentMetadataPolicy(), policiesByFile, this.selectedUtds, resolvedKinds, readOnlyFiles,
         async (completed: number, total: number): Promise<void> => {
           await this.batchLiveView.update(completed, total);
-        }, pdfWatermark);
+        }, anyPdfWatermark);
       if (operation !== this.operationVersion) {
         await this.getService().discardSanitized(files);
         await this.batchLiveView.finish(false, this.selectedUris.length);
@@ -1269,8 +1549,9 @@ struct Index {
       }
       this.sanitizedFiles = files;
       let visualCount: number = 0;
-      for (let imageIndex: number = 0; imageIndex < actionsByFile.length; imageIndex++) {
-        visualCount += actionsByFile[imageIndex].length;
+      for (let fileIndex: number = 0; fileIndex < files.length; fileIndex++) {
+        const sourceIndex: number = files[fileIndex].sourceIndex;
+        if (sourceIndex < actionsByFile.length) visualCount += actionsByFile[sourceIndex].length;
       }
       this.appliedVisualCount = visualCount;
       // Count only entries whose file actually produced a verified copy. A
@@ -1290,15 +1571,19 @@ struct Index {
       this.flowLog('ui_sanitize_done', `files=${files.length}`);
       this.getUIContext().animateTo({ duration: 240, curve: Curve.Friction }, () => {
         this.status = PageStatus.READY;
-        this.showSafePreview = true;
+        this.showSafePreview = false;
       });
+      this.syncPdfPreview();
       const skippedMedia: number = this.selectedUris.length - files.length;
       const removedPhrase: string = removedEntries > 0 ? `，已删除 ${removedEntries} 项隐私条目` : '';
+      const skipPhrase: string = skippedMedia > 0 ?
+        (this.scanResults.some((result: PrivacyScanResult) => result.scanFailed) ?
+          '部分文件检查失败或只读，未生成副本' : '只读或不支持的文件未处理') : '';
       this.message = files.length === 1 ?
-        (skippedMedia > 0 ? `安全副本已生成${removedPhrase}；只读文件未处理` :
-          `安全副本已生成${removedPhrase}，隐私复检通过`) :
-        (skippedMedia > 0 ? `${files.length} 个安全副本已生成${removedPhrase}；只读文件未处理` :
-          `${files.length} 个安全副本均已复检${removedPhrase}`);
+        (skippedMedia > 0 ? `安全副本已生成${removedPhrase}；${skipPhrase}` :
+          `安全副本已生成${removedPhrase}`) :
+        (skippedMedia > 0 ? `${files.length} 个安全副本已生成${removedPhrase}；${skipPhrase}` :
+          `${files.length} 个安全副本已生成${removedPhrase}`);
       await this.batchLiveView.finish(true, files.length);
     } catch (error) {
       if (operation !== this.operationVersion) {
@@ -1768,12 +2053,21 @@ struct Index {
     finding.replacementValue = value;
     if (finding.subtype === 'DEVICE_MAKE') this.replacementCameraMake = value;
     if (finding.subtype === 'DEVICE_MODEL') this.replacementCameraModel = value;
-    if (finding.subtype === 'AUTHOR') this.replacementAuthor = value;
+    if (finding.subtype === 'AUTHOR' || finding.subtype === 'DOCX_AUTHOR' ||
+      finding.subtype === 'PDF_AUTHOR') this.replacementAuthor = value;
     if (finding.subtype === 'COPYRIGHT') this.replacementCopyright = value;
-    if (finding.subtype === 'DESCRIPTION') this.replacementDescription = value;
+    if (finding.subtype === 'DESCRIPTION' || finding.subtype === 'DOCX_DESCRIPTION') {
+      this.replacementDescription = value;
+    }
     if (finding.subtype === 'GPS') {
       const coordinates: string[] = value.split('|');
-      if (coordinates.length !== 2) return;
+      if (coordinates.length !== 2 || coordinates[0].trim().length === 0 ||
+        coordinates[1].trim().length === 0) {
+        this.getUIContext().getPromptAction().showToast({
+          message: 'GPS 替换格式应为「纬度 | 经度」'
+        });
+        return;
+      }
       this.replacementGpsLatitude = coordinates[0].trim();
       this.replacementGpsLongitude = coordinates[1].trim();
     }
@@ -1907,6 +2201,47 @@ struct Index {
     this.saveMetadataDefaults();
   }
 
+  @Builder
+  WatermarkColorControls() {
+    // Free color first-class: presets + current swatch opens the full picker.
+    Row({ space: 8 }) {
+      ForEach(this.watermarkPresetColors(), (preset: string) => {
+        Stack() {
+          Row().width(26).height(26).borderRadius(13).backgroundColor(preset)
+            .border({ width: preset === '#FFFFFF' ? 1.5 : 0.5,
+              color: $r('app.color.surface_outline') })
+          if (this.watermarkColor === preset) {
+            SymbolGlyph($r('sys.symbol.checkmark')).fontSize(12)
+              .fontColor([preset === '#FFFFFF' ? Color.Black : Color.White])
+          }
+        }.width(32).height(32)
+          .accessibilityText(`颜色 ${preset}`)
+          .onClick(() => {
+            this.watermarkColor = preset;
+            this.customWatermarkColor = preset;
+            this.watermarkDarkText = preset === '#000000';
+            this.saveMetadataDefaults();
+          })
+      }, (preset: string) => `${preset}-${this.watermarkColor === preset}`)
+      Button({ type: ButtonType.Capsule }) {
+        Row({ space: 6 }) {
+          Row().width(18).height(18).borderRadius(6)
+            .backgroundColor(this.watermarkColor)
+            .border({ width: 1, color: $r('app.color.surface_outline') })
+          Text('自定义').fontSize(12).fontColor($r('app.color.accent'))
+        }
+      }
+      .height(34).padding({ left: 10, right: 10 })
+      .backgroundColor($r('app.color.accent_soft'))
+      .accessibilityText('打开颜色选择器')
+      .onClick(() => this.openWatermarkColorPicker())
+    }
+  }
+
+  private watermarkPresetColors(): string[] {
+    return ['#FFFFFF', '#000000', '#007D6E', '#0A59F7', '#E84026', '#FF8A00', '#8B5CF6'];
+  }
+
   private watermarkColorMode(): number {
     if (this.watermarkColor === '#FFFFFF') return 0;
     if (this.watermarkColor === '#000000') return 1;
@@ -1979,12 +2314,50 @@ struct Index {
   private currentPreviewUri(): string {
     if (this.status === PageStatus.READY && this.showSafePreview) {
       const safeFile: SanitizedFile | undefined = this.sanitizedFileForSource(this.previewIndex);
+      // Never fall back to the source URI on the “安全副本” segment: a skipped
+      // or failed item would otherwise present the original as if it were clean.
       if (safeFile !== undefined) return safeFile.uri;
     }
     if (this.previewIndex < this.selectedUris.length) {
       return this.selectedUris[this.previewIndex];
     }
     return this.selectedUri;
+  }
+
+  private hasSafePreviewForCurrent(): boolean {
+    return this.sanitizedFileForSource(this.previewIndex) !== undefined;
+  }
+
+  /**
+   * Compare bar only when pixels actually differ. Metadata-only clean
+   * (audio/video/office/pdf without watermark, image without redaction or
+   * watermark) produces an identical picture — a toggle would be noise.
+   */
+  private shouldShowSafeCompare(): boolean {
+    if (this.status !== PageStatus.READY || this.sanitizedFiles.length === 0) return false;
+    if (!this.hasSafePreviewForCurrent()) return false;
+    if (this.trackedFileKind === FileKind.IMAGE) {
+      if (this.appliedVisualCount > 0) return true;
+      if (this.watermarkApplied && this.currentSupportsPixelWatermark() &&
+        (this.purposeWatermark.trim().length > 0 || this.imageWatermarkUri.length > 0)) {
+        return true;
+      }
+      // Count only redactions that belong to the current file.
+      for (let index: number = 0; index < this.findings.length; index++) {
+        const finding: PrivacyFinding = this.findings[index];
+        if (finding.sourceIndex === this.previewIndex && finding.selectedForRemoval &&
+          finding.region !== undefined) {
+          return true;
+        }
+      }
+      return false;
+    }
+    // PDF: only if a page watermark was actually requested this session.
+    if (this.trackedFileKind === FileKind.PDF) {
+      return this.pdfWatermarkOn && this.pdfWatermarkText.trim().length > 0;
+    }
+    // Audio / video / office: metadata-only containers — no pixel compare.
+    return false;
   }
 
   private async openFullFilePreview(): Promise<void> {
@@ -2098,8 +2471,35 @@ struct Index {
       this.previewIndex = sourceIndex;
       this.syncTrackedFileKind();
       this.syncPreviewPixelSize();
+      // A skipped/failed item has no safe copy; stay on the original segment
+      // instead of labeling the source URI as「安全副本」.
+      if (this.status === PageStatus.READY && this.sanitizedFileForSource(sourceIndex) === undefined) {
+        this.showSafePreview = false;
+      }
     });
     this.syncPdfPreview();
+  }
+
+  /**
+   * Universal preview-pane modes:
+   * - Full-bleed media (photo / video thumb / rendered PDF page): one height
+   *   on the frame; every child is 100% so they cannot overflow.
+   * - Compact type card: no fixed height — the card sizes to its content.
+   * Mixing these (fixed 86px frame + child using previewHeight()) is what
+   * stacked PDF pages on top of the inspector cards.
+   */
+  private usesFullBleedPreview(): boolean {
+    if (this.trackedFileKind === FileKind.IMAGE) return true;
+    if (this.hasVideoPreview()) return true;
+    return this.trackedFileKind === FileKind.PDF && this.pdfPreviewPixelMap !== undefined;
+  }
+
+  /** Height for full-bleed preview frames only. */
+  private previewPaneHeight(): number {
+    if (this.hasVideoPreview() && this.trackedFileKind === FileKind.AUDIO_VIDEO) {
+      return this.mediaPreviewHeight();
+    }
+    return this.previewHeight();
   }
 
   private previewHeight(): number {
@@ -2182,10 +2582,12 @@ struct Index {
   }
 
   private previewOffsetX(): number {
+    if (this.previewPixelWidthState <= 0) return 0;
     return (this.previewSurfaceWidth() - this.previewPixelWidthState * this.previewScale()) / 2;
   }
 
   private previewOffsetY(): number {
+    if (this.previewPixelHeightState <= 0) return 0;
     return (this.previewSurfaceHeight() - this.previewPixelHeightState * this.previewScale()) / 2;
   }
 
@@ -2261,19 +2663,22 @@ struct Index {
 
   @Builder
   WatermarkPreviewOverlay() {
-    // Live preview must follow the watermark toggle, not the share-entry
-    // mode: users enable the watermark on the result page of a privacy run.
-    if (this.currentTextWatermarkSupported() &&
-      (this.featureMode === FeatureMode.WATERMARK || this.watermarkApplied) &&
+    // Same gate as the original release for still images that can re-encode.
+    // Metadata-only formats strip watermark at generate time — do not preview.
+    if ((this.featureMode === FeatureMode.WATERMARK || this.watermarkApplied) &&
+      this.currentSupportsPixelWatermark() &&
       this.purposeWatermark.trim().length > 0 && this.status !== PageStatus.READY) {
       Column({ space: 34 * this.watermarkSpacing }) {
         ForEach([0, 1, 2, 3, 4, 5, 6, 7, 8, 9], (row: number) => {
           Row({ space: 54 * this.watermarkSpacing }) {
             ForEach([0, 1, 2, 3], (column: number) => {
               Text(this.purposeWatermark)
-                .fontSize(18 * this.watermarkScale).fontWeight(FontWeight.Bold)
+                .fontSize(Math.max(12, Math.min(this.previewContentWidth(), this.previewContentHeight()) * 0.055 *
+                  Math.max(0.7, Math.min(1.6, this.watermarkScale))))
+                .fontWeight(FontWeight.Bold)
                 .fontColor(this.watermarkColor)
-                .opacity(Math.max(0.12, Math.min(0.55, this.watermarkOpacity)))
+                // Match PurposeWatermark.apply: alpha = clamp(opacity*255, 28, 180)
+                .opacity(Math.max(28 / 255, Math.min(180 / 255, this.watermarkOpacity)))
                 .rotate({ angle: this.watermarkAngle })
                 .maxLines(1)
             }, (column: number) => `${row}-${column}`)
@@ -2365,18 +2770,33 @@ struct Index {
     // 仅 PDF 会话显示；状态与照片水印完全独立。
     Column({ space: 10 }) {
       Row() {
-        Column({ space: 3 }) {
-          Text('PDF 水印').fontSize(15).fontWeight(FontWeight.Medium)
-            .fontColor($r('app.color.text_primary'))
-          Text(this.pdfWatermarkOn ? '水印将写入 PDF 副本每一页' : '开启后为 PDF 副本整页添加水印')
-            .fontSize(11).fontColor($r('app.color.text_tertiary'))
-        }.layoutWeight(1).alignItems(HorizontalAlign.Start)
-        Toggle({ type: ToggleType.Switch, isOn: this.pdfWatermarkOn })
-          .onChange((value: boolean) => {
-            this.getUIContext().animateTo({ duration: 240, curve: Curve.Friction }, () => {
-              this.pdfWatermarkOn = value;
-            });
-          })
+        if (this.isLeftHand()) {
+          Toggle({ type: ToggleType.Switch, isOn: this.pdfWatermarkOn })
+            .onChange((value: boolean) => {
+              this.getUIContext().animateTo({ duration: 240, curve: Curve.Friction }, () => {
+                this.pdfWatermarkOn = value;
+              });
+            })
+          Column({ space: 3 }) {
+            Text('PDF 水印').fontSize(15).fontWeight(FontWeight.Medium)
+              .fontColor($r('app.color.text_primary'))
+            Text(this.pdfWatermarkOn ? '水印将写入 PDF 副本每一页' : '开启后为 PDF 副本整页添加水印')
+              .fontSize(11).fontColor($r('app.color.text_tertiary'))
+          }.layoutWeight(1).alignItems(HorizontalAlign.End)
+        } else {
+          Column({ space: 3 }) {
+            Text('PDF 水印').fontSize(15).fontWeight(FontWeight.Medium)
+              .fontColor($r('app.color.text_primary'))
+            Text(this.pdfWatermarkOn ? '水印将写入 PDF 副本每一页' : '开启后为 PDF 副本整页添加水印')
+              .fontSize(11).fontColor($r('app.color.text_tertiary'))
+          }.layoutWeight(1).alignItems(HorizontalAlign.Start)
+          Toggle({ type: ToggleType.Switch, isOn: this.pdfWatermarkOn })
+            .onChange((value: boolean) => {
+              this.getUIContext().animateTo({ duration: 240, curve: Curve.Friction }, () => {
+                this.pdfWatermarkOn = value;
+              });
+            })
+        }
       }.width('100%')
       if (this.pdfWatermarkOn) {
         TextInput({ placeholder: '输入 PDF 水印文字', text: this.pdfWatermarkText })
@@ -2432,7 +2852,7 @@ struct Index {
   }
 
   private previewImageWatermarkSize(): number {
-    return Math.max(42, Math.min(this.previewWidth(), this.previewHeight()) *
+    return Math.max(42, Math.min(this.previewContentWidth(), this.previewContentHeight()) *
       Math.max(0.08, Math.min(0.55, this.imageWatermarkScale)));
   }
 
@@ -2448,24 +2868,27 @@ struct Index {
 
   private previewImageWatermarkX(size: number): number {
     const column: number = this.imageWatermarkPosition % 3;
-    const margin: number = Math.min(this.previewWidth(), this.previewHeight()) * this.imageWatermarkMargin;
+    const boxWidth: number = this.previewContentWidth();
+    const margin: number = Math.min(boxWidth, this.previewContentHeight()) * this.imageWatermarkMargin;
     if (column === 0) return margin;
-    if (column === 1) return (this.previewWidth() - size) / 2;
-    return this.previewWidth() - size - margin;
+    if (column === 1) return (boxWidth - size) / 2;
+    return boxWidth - size - margin;
   }
 
   private previewImageWatermarkY(size: number): number {
     const row: number = Math.floor(this.imageWatermarkPosition / 3);
-    const margin: number = Math.min(this.previewWidth(), this.previewHeight()) * this.imageWatermarkMargin;
+    const boxWidth: number = this.previewContentWidth();
+    const boxHeight: number = this.previewContentHeight();
+    const margin: number = Math.min(boxWidth, boxHeight) * this.imageWatermarkMargin;
     if (row === 0) return margin;
-    if (row === 1) return (this.previewHeight() - size) / 2;
-    return this.previewHeight() - size - margin;
+    if (row === 1) return (boxHeight - size) / 2;
+    return boxHeight - size - margin;
   }
 
   @Builder
   ImageWatermarkPreviewOverlay() {
-    if (this.currentImageWatermarkSupported() &&
-      (this.featureMode === FeatureMode.WATERMARK || this.watermarkApplied) &&
+    if ((this.featureMode === FeatureMode.WATERMARK || this.watermarkApplied) &&
+      this.currentSupportsPixelWatermark() &&
       this.imageWatermarkUri.length > 0 && this.status !== PageStatus.READY) {
       if (this.imageWatermarkTiled) {
         ForEach([0, 1, 2, 3], (row: number) => {
@@ -2475,8 +2898,8 @@ struct Index {
               .objectFit(ImageFit.Contain).opacity(this.imageWatermarkOpacity)
               .rotate({ angle: this.imageWatermarkAngle })
               .position({
-                x: column * this.previewWidth() / 3 + (row % 2 === 0 ? -8 : 18),
-                y: row * this.previewHeight() / 4
+                x: column * this.previewContentWidth() / 3 + (row % 2 === 0 ? -8 : 18),
+                y: row * this.previewContentHeight() / 4
               })
           }, (column: number) => `image-mark-${row}-${column}`)
         }, (row: number) => `image-mark-row-${row}`)
@@ -2568,7 +2991,11 @@ struct Index {
         this.previewIndex--;
         this.syncTrackedFileKind();
         this.syncPreviewPixelSize();
+        if (this.status === PageStatus.READY && this.sanitizedFileForSource(this.previewIndex) === undefined) {
+          this.showSafePreview = false;
+        }
       });
+      this.syncPdfPreview();
     }
   }
 
@@ -2578,7 +3005,11 @@ struct Index {
         this.previewIndex++;
         this.syncTrackedFileKind();
         this.syncPreviewPixelSize();
+        if (this.status === PageStatus.READY && this.sanitizedFileForSource(this.previewIndex) === undefined) {
+          this.showSafePreview = false;
+        }
       });
+      this.syncPdfPreview();
     }
   }
 
@@ -2586,6 +3017,19 @@ struct Index {
   MetadataFindingRow(finding: PrivacyFinding) {
     Column({ space: 0 }) {
       Row({ space: 12 * this.tabletUiScale() }) {
+        if (this.isLeftHand()) {
+          if (!this.isCurrentFileReadOnly()) {
+            SymbolGlyph($r('sys.symbol.chevron_down')).fontSize(14 * this.tabletUiScale())
+              .fontColor([$r('app.color.text_tertiary')])
+              .rotate({ angle: this.expandedMetadataId === finding.id ? 180 : 0 })
+              .animation({ duration: 220, curve: Curve.EaseOut })
+          }
+          Text(this.isCurrentFileReadOnly() ? '仅查看' : this.metadataStateLabel(finding))
+            .fontSize(12 * this.tabletUiScale())
+            .fontColor(this.isCurrentFileReadOnly() ? $r('app.color.text_tertiary') :
+              (this.isMetadataReplacementSelected(finding) ? $r('app.color.link') :
+              (finding.selectedForRemoval ? $r('app.color.warning') : $r('app.color.text_tertiary'))))
+        }
         Column() {
           Text(finding.risk === RiskLevel.HIGH ? '!' : '•')
             .fontSize(16 * this.tabletUiScale()).fontWeight(FontWeight.Bold)
@@ -2600,17 +3044,20 @@ struct Index {
             .fontColor($r('app.color.text_primary'))
           Text(this.displayValue(finding)).fontSize(12 * this.tabletUiScale())
             .fontColor($r('app.color.text_secondary')).maxLines(1)
-        }.layoutWeight(1).alignItems(HorizontalAlign.Start)
-        Text(this.isCurrentFileReadOnly() ? '仅查看' : this.metadataStateLabel(finding))
-          .fontSize(12 * this.tabletUiScale())
-          .fontColor(this.isCurrentFileReadOnly() ? $r('app.color.text_tertiary') :
-            (this.isMetadataReplacementSelected(finding) ? $r('app.color.link') :
-            (finding.selectedForRemoval ? $r('app.color.warning') : $r('app.color.text_tertiary'))))
-        if (!this.isCurrentFileReadOnly()) {
-          SymbolGlyph($r('sys.symbol.chevron_down')).fontSize(14 * this.tabletUiScale())
-            .fontColor([$r('app.color.text_tertiary')])
-            .rotate({ angle: this.expandedMetadataId === finding.id ? 180 : 0 })
-            .animation({ duration: 220, curve: Curve.EaseOut })
+        }.layoutWeight(1)
+          .alignItems(this.isLeftHand() ? HorizontalAlign.End : HorizontalAlign.Start)
+        if (!this.isLeftHand()) {
+          Text(this.isCurrentFileReadOnly() ? '仅查看' : this.metadataStateLabel(finding))
+            .fontSize(12 * this.tabletUiScale())
+            .fontColor(this.isCurrentFileReadOnly() ? $r('app.color.text_tertiary') :
+              (this.isMetadataReplacementSelected(finding) ? $r('app.color.link') :
+              (finding.selectedForRemoval ? $r('app.color.warning') : $r('app.color.text_tertiary'))))
+          if (!this.isCurrentFileReadOnly()) {
+            SymbolGlyph($r('sys.symbol.chevron_down')).fontSize(14 * this.tabletUiScale())
+              .fontColor([$r('app.color.text_tertiary')])
+              .rotate({ angle: this.expandedMetadataId === finding.id ? 180 : 0 })
+              .animation({ duration: 220, curve: Curve.EaseOut })
+          }
         }
       }
       .width('100%').padding({ top: 14 * this.tabletUiScale(), bottom: 14 * this.tabletUiScale() })
@@ -2621,29 +3068,26 @@ struct Index {
       // animation + clip) instead of flying in from off-screen.
       if (this.hasSanitizableFiles()) {
         Row({ space: 10 }) {
-          Button(this.isMetadataDeleted(finding) ? '保留' : '删除',
-            { type: ButtonType.Capsule })
-            .layoutWeight(1).height(40 * this.tabletUiScale())
-            .enabled(this.expandedMetadataId === finding.id)
-            .fontColor(this.isMetadataDeleted(finding) ?
-              $r('app.color.accent') : $r('app.color.warning'))
-            .backgroundColor(this.isMetadataDeleted(finding) ?
-              $r('app.color.accent_soft') : $r('app.color.warning_soft'))
-            .onClick(() => this.chooseMetadataDeletion(finding))
-          if (this.canReplaceMetadata(finding)) {
-            Button(this.isMetadataReplacementSelected(finding) ? '重新替换' : '替换',
-              { type: ButtonType.Capsule })
-              .layoutWeight(1).height(40 * this.tabletUiScale())
-              .enabled(this.expandedMetadataId === finding.id)
-              .fontColor(this.isMetadataReplacementSelected(finding) ? $r('app.color.on_accent') :
-                $r('app.color.link'))
-              .backgroundColor(this.isMetadataReplacementSelected(finding) ? $r('app.color.link') :
-                $r('app.color.accent_soft'))
-              .onClick(() => this.beginMetadataReplacement(finding))
+          // Compact content-sized pills (not layoutWeight). Primary action
+          // sits on the thumb side so left/right actually reads differently.
+          if (this.effectiveFabHand() === 'left') {
+            this.MetadataDeleteButton(finding)
+            if (this.canReplaceMetadata(finding)) {
+              this.MetadataReplaceButton(finding)
+            }
+            Blank().layoutWeight(1)
+          } else {
+            Blank().layoutWeight(1)
+            if (this.canReplaceMetadata(finding)) {
+              this.MetadataReplaceButton(finding)
+            }
+            this.MetadataDeleteButton(finding)
           }
         }
-        .width('100%').padding({ left: 44, right: 4 })
+        .width('100%').padding({ left: 16, right: 8 })
         .constraintSize({ maxWidth: '100%' })
+        .justifyContent(this.effectiveFabHand() === 'left' ?
+          FlexAlign.Start : FlexAlign.End)
         .height(this.expandedMetadataId === finding.id ? 54 * this.tabletUiScale() : 0)
         .opacity(this.expandedMetadataId === finding.id ? 1 : 0)
         .animation({ duration: 240, curve: Curve.Friction })
@@ -2656,8 +3100,49 @@ struct Index {
   }
 
   @Builder
+  MetadataDeleteButton(finding: PrivacyFinding) {
+    Button(this.isMetadataDeleted(finding) ? '保留' : '删除',
+      { type: ButtonType.Capsule })
+      .padding({ left: 18, right: 18 })
+      .height(40 * this.tabletUiScale())
+      .enabled(this.expandedMetadataId === finding.id)
+      .fontColor(this.isMetadataDeleted(finding) ?
+        $r('app.color.accent') : $r('app.color.warning'))
+      .backgroundColor(this.isMetadataDeleted(finding) ?
+        $r('app.color.accent_soft') : $r('app.color.warning_soft'))
+      .onClick(() => this.chooseMetadataDeletion(finding))
+  }
+
+  @Builder
+  MetadataReplaceButton(finding: PrivacyFinding) {
+    Button(this.isMetadataReplacementSelected(finding) ? '重新替换' : '替换',
+      { type: ButtonType.Capsule })
+      .padding({ left: 18, right: 18 })
+      .height(40 * this.tabletUiScale())
+      .enabled(this.expandedMetadataId === finding.id)
+      .fontColor(this.isMetadataReplacementSelected(finding) ? $r('app.color.on_accent') :
+        $r('app.color.link'))
+      .backgroundColor(this.isMetadataReplacementSelected(finding) ? $r('app.color.link') :
+        $r('app.color.accent_soft'))
+      .onClick(() => this.beginMetadataReplacement(finding))
+  }
+
+  @Builder
   FindingRow(finding: PrivacyFinding) {
     Row({ space: 12 }) {
+      if (this.isLeftHand()) {
+        Column({ space: 3 }) {
+          Text(finding.selectedForRemoval ? '遮盖' : '保留')
+            .fontSize(11)
+            .fontColor(finding.selectedForRemoval ? $r('app.color.accent') : $r('app.color.text_tertiary'))
+          Toggle({ type: ToggleType.Switch, isOn: finding.selectedForRemoval })
+            .onChange((selected: boolean) => {
+              finding.selectedForRemoval = selected;
+              this.findings = this.findings.slice();
+              this.refreshDerivedFindings();
+            })
+        }
+      }
       Column() {
         Text(finding.risk === RiskLevel.HIGH ? '!' : '•')
           .fontSize(16)
@@ -2674,18 +3159,20 @@ struct Index {
         Text(finding.title).fontSize(15).fontWeight(FontWeight.Medium).fontColor($r('app.color.text_primary'))
         Text(this.displayValue(finding)).fontSize(12).fontColor($r('app.color.text_secondary')).maxLines(1)
         Text(finding.recommendation).fontSize(12).fontColor($r('app.color.accent'))
-      }.layoutWeight(1).alignItems(HorizontalAlign.Start)
+      }.layoutWeight(1).alignItems(this.isLeftHand() ? HorizontalAlign.End : HorizontalAlign.Start)
 
-      Column({ space: 3 }) {
-        Text(finding.selectedForRemoval ? '遮盖' : '保留')
-          .fontSize(11)
-          .fontColor(finding.selectedForRemoval ? $r('app.color.accent') : $r('app.color.text_tertiary'))
-        Toggle({ type: ToggleType.Switch, isOn: finding.selectedForRemoval })
-          .onChange((selected: boolean) => {
-            finding.selectedForRemoval = selected;
-            this.findings = this.findings.slice();
-            this.refreshDerivedFindings();
-          })
+      if (!this.isLeftHand()) {
+        Column({ space: 3 }) {
+          Text(finding.selectedForRemoval ? '遮盖' : '保留')
+            .fontSize(11)
+            .fontColor(finding.selectedForRemoval ? $r('app.color.accent') : $r('app.color.text_tertiary'))
+          Toggle({ type: ToggleType.Switch, isOn: finding.selectedForRemoval })
+            .onChange((selected: boolean) => {
+              finding.selectedForRemoval = selected;
+              this.findings = this.findings.slice();
+              this.refreshDerivedFindings();
+            })
+        }
       }
     }
     .width('100%')
@@ -2844,6 +3331,10 @@ struct Index {
         .onClick(() => {
           this.openTutorial();
         })
+      Text('暂不支持动态照片')
+        .fontSize(11)
+        .fontColor($r('app.color.text_tertiary'))
+        .opacity(0.85)
     }
     .width('100%').height('100%')
     .justifyContent(FlexAlign.Center)
@@ -2866,102 +3357,186 @@ struct Index {
   }
 
   /**
-   * Files tab: six file types sit evenly on a circle around one central pick
-   * button. The ring is sized from the viewport so entries never clip on
-   * small phones; every node opens its own picker.
+   * Files tab: left = pick-any-document button; right = type pills stacked
+   * vertically. No orbit — survives every aspect ratio without clipping.
    */
   @Builder
   FilesHome() {
-    Stack({ alignContent: Alignment.Center }) {
-      Stack() {
-        this.FileTypeNode($r('sys.symbol.doc_text'), 'PDF', 0, () => this.chooseDocument(FileKind.PDF))
-        this.FileTypeNode($r('sys.symbol.doc_plaintext'), 'Word', 72, () => this.chooseDocument(FileKind.WORD))
-        this.FileTypeNode($r('sys.symbol.doc_plaintext_2'), 'Excel', 144, () => this.chooseDocument(FileKind.EXCEL))
-        this.FileTypeNode($r('sys.symbol.doc_text_2'), 'PPT', 216, () => this.chooseDocument(FileKind.POWERPOINT))
-        this.FileTypeNode($r('sys.symbol.movie'), '音视频', 288, () => this.chooseMedia())
+    Column({ space: 0 }) {
+      Row({ space: 20 }) {
+        Column({ space: 12 }) {
+          Button({ type: ButtonType.Circle }) {
+            SymbolGlyph($r('sys.symbol.folder_badge_plus'))
+              .fontSize(36 * this.tabletUiScale())
+              .fontColor([$r('app.color.on_accent')])
+          }
+          .width(100 * this.tabletUiScale()).height(100 * this.tabletUiScale())
+          .backgroundColor($r('app.color.accent'))
+          .shadow({ radius: 16, color: $r('app.color.shadow'), offsetY: 5 })
+          .accessibilityText('选择文档')
+          .onClick(() => this.chooseDocument())
+          Text('选择文档').fontSize(15 * this.tabletUiScale()).fontWeight(FontWeight.Medium)
+            .fontColor($r('app.color.text_primary'))
+        }
+        .layoutWeight(1)
+        .justifyContent(FlexAlign.Center)
+        .alignItems(HorizontalAlign.Center)
+
+        Column({ space: 10 }) {
+          this.FileTypePill($r('sys.symbol.doc_text'), 'PDF', () => this.chooseDocument(FileKind.PDF))
+          this.FileTypePill($r('sys.symbol.doc_plaintext'), 'Word', () => this.chooseDocument(FileKind.WORD))
+          this.FileTypePill($r('sys.symbol.doc_plaintext_2'), 'Excel', () => this.chooseDocument(FileKind.EXCEL))
+          this.FileTypePill($r('sys.symbol.doc_text_2'), 'PPT', () => this.chooseDocument(FileKind.POWERPOINT))
+          this.FileTypePill($r('sys.symbol.movie'), '音视频', () => this.chooseMedia())
+        }
+        .layoutWeight(1)
+        .justifyContent(FlexAlign.Center)
+        .alignItems(HorizontalAlign.Start)
       }
-      .width(this.orbitDiameter()).height(this.orbitDiameter())
+      .width('100%').layoutWeight(1)
+      .alignItems(VerticalAlign.Center)
+      .padding({ left: 24, right: 24 })
       .hitTestBehavior(HitTestMode.Transparent)
 
-      Column({ space: 10 }) {
-        Button({ type: ButtonType.Circle }) {
-          SymbolGlyph($r('sys.symbol.folder_badge_plus'))
-            .fontSize(34 * this.tabletUiScale())
-            .fontColor([$r('app.color.on_accent')])
-        }
-        .width(92 * this.tabletUiScale()).height(92 * this.tabletUiScale())
-        .backgroundColor($r('app.color.accent'))
-        .shadow({ radius: 16, color: $r('app.color.shadow'), offsetY: 5 })
-        .accessibilityText('选择文档')
-        .onClick(() => this.chooseDocument())
-        Text('选择文档').fontSize(15 * this.tabletUiScale()).fontWeight(FontWeight.Medium)
-          .fontColor($r('app.color.text_primary'))
-      }
+      Text('净享SafeShare 支持的文件类型 ›')
+        .fontSize(12)
+        .fontColor($r('app.color.link'))
+        .margin({ top: 8, bottom: 4 })
+        .accessibilityRole(AccessibilityRoleType.BUTTON)
+        .accessibilityText('查看支持的文件类型')
+        .onClick(() => {
+          this.supportListVisible = true;
+        })
     }
     .width('100%').height('100%')
-    // The tab content extends behind the floating capsule bar, which drags
-    // the vertical center below the visual midpoint. Re-center by padding
-    // out the bar zone; less in landscape where vertical space is scarce.
-    .padding({ bottom: this.homeContentSafeInset() })
+    .padding({ top: this.isLandscapeWindow() ? 8 : 16, bottom: this.homeContentSafeInset() })
     .onDragEnter((event: DragEvent) => {
       event.dragBehavior = DragBehavior.COPY;
       this.isDropTargetActive = true;
     })
     .onDragLeave(() => this.isDropTargetActive = false)
     .onDrop((event: DragEvent) => this.handleImageDrop(event))
+    .bindSheet(this.supportListVisible, this.SupportedFilesSheet, {
+      preferType: SheetType.BOTTOM,
+      showClose: false,
+      dragBar: true,
+      height: Math.min(520, this.viewportHeight * 0.72),
+      width: Math.max(240, Math.min(520, this.viewportWidth - 24)),
+      radius: LengthMetrics.vp(32),
+      maskColor: $r('app.color.sheet_mask'),
+      blurStyle: BlurStyle.COMPONENT_ULTRA_THICK,
+      onDisappear: () => this.supportListVisible = false
+    })
   }
 
-  /** Responsive ring: node spacing scales with the window, clamped for tablets. */
-  private orbitRadius(): number {
-    // Width alone makes a landscape ring overflow vertically. Use the short
-    // side so freeform, split-screen and foldable canvases remain bounded.
-    const shortSide: number = Math.min(this.viewportWidth, this.viewportHeight);
-    const baseRadius: number = Math.max(104, Math.min(150, shortSide * 0.17));
-    return baseRadius * this.tabletUiScale();
+  @Builder
+  FileTypePill(icon: Resource, title: string, onOpen: () => void) {
+    Row({ space: 10 }) {
+      SymbolGlyph(icon)
+        .fontSize(20 * this.tabletUiScale())
+        .fontColor([$r('app.color.accent')])
+      Text(title)
+        .fontSize(15 * this.tabletUiScale()).fontWeight(FontWeight.Medium)
+        .fontColor($r('app.color.text_primary'))
+        .layoutWeight(1)
+    }
+    .width(Math.min(200, Math.max(140, this.viewportWidth * 0.38)))
+    .padding({ left: 16, right: 16, top: 14, bottom: 14 })
+    .borderRadius(18)
+    .backgroundColor($r('app.color.surface'))
+    .border({ width: 1.5, color: $r('app.color.surface_outline') })
+    .shadow({ radius: 8, color: $r('app.color.shadow'), offsetY: 3 })
+    .accessibilityText(`选择${title}文件`)
+    .onClick(() => onOpen())
+  }
+
+  @Builder
+  SupportedFilesSheet() {
+    Column({ space: 0 }) {
+      Row() {
+        Text('支持的文件类型')
+          .fontSize(18).fontWeight(FontWeight.Bold)
+          .fontColor($r('app.color.text_primary'))
+        Blank()
+        Text('元数据清理')
+          .fontSize(12).fontColor($r('app.color.text_tertiary'))
+      }.width('100%').padding({ bottom: 14 })
+      Scroll() {
+        Column({ space: 18 }) {
+          this.supportSection('仅检查', [
+            new SupportTypeItem($r('sys.symbol.music_note_list'), '其他音频', '.ogg .opus .aac .amr',
+              '不生成清理副本', '仅检查', false)
+          ])
+          this.supportSection('暂不支持', [
+            new SupportTypeItem($r('sys.symbol.eye_viewfinder_slash'), '动态照片', '相册动图',
+              '不支持', '不支持', false),
+            new SupportTypeItem($r('sys.symbol.doc_plaintext'), '旧版 Office', '.doc .xls .ppt',
+              'Office 97–2003，请先另存为新格式', '不支持', false),
+            new SupportTypeItem($r('sys.symbol.lock'), '加密 / 签名文档', '密码保护 · 数字签名',
+              '清理会破坏加密或签名', '不支持', false)
+          ])
+          Text('只清理元数据，不改画质、音质或正文。原文件不会被修改。')
+            .fontSize(12).fontColor($r('app.color.text_tertiary'))
+            .width('100%').textAlign(TextAlign.Center)
+            .padding({ top: 4, bottom: 8 })
+        }.width('100%')
+      }
+      .layoutWeight(1).width('100%')
+      .scrollBar(BarState.Auto).edgeEffect(EdgeEffect.None)
+    }
+    .width('100%')
+    .height(Math.min(560, this.viewportHeight * 0.78))
+    .padding({ left: 20, right: 20, top: 22, bottom: 16 })
+  }
+
+  @Builder
+  supportSection(title: string, items: SupportTypeItem[]) {
+    Column({ space: 8 }) {
+      Text(title)
+        .fontSize(13).fontWeight(FontWeight.Medium)
+        .fontColor($r('app.color.text_secondary'))
+        .width('100%')
+      ForEach(items, (item: SupportTypeItem) => {
+        this.SupportTypeRow(item)
+      }, (item: SupportTypeItem) => `${item.title}-${item.detail}`)
+    }.width('100%')
+  }
+
+  @Builder
+  SupportTypeRow(item: SupportTypeItem) {
+    Row({ space: 12 }) {
+      Column() {
+        SymbolGlyph(item.icon).fontSize(18)
+          .fontColor([item.badgeOk ? $r('app.color.accent') : $r('app.color.text_tertiary')])
+      }.width(40).height(40).justifyContent(FlexAlign.Center)
+        .borderRadius(12)
+        .backgroundColor(item.badgeOk ? $r('app.color.accent_soft') : $r('app.color.surface_outline'))
+      Column({ space: 3 }) {
+        Row({ space: 8 }) {
+          Text(item.title).fontSize(14).fontWeight(FontWeight.Medium)
+            .fontColor($r('app.color.text_primary'))
+          Text(item.badge).fontSize(10).fontWeight(FontWeight.Medium)
+            .fontColor(item.badgeOk ? $r('app.color.accent') : $r('app.color.text_tertiary'))
+            .padding({ left: 6, right: 6, top: 2, bottom: 2 })
+            .borderRadius(6)
+            .backgroundColor(item.badgeOk ? $r('app.color.accent_soft') : $r('app.color.surface_outline'))
+        }.alignItems(VerticalAlign.Center)
+        Text(item.detail).fontSize(12).fontColor($r('app.color.text_secondary'))
+        Text(item.note).fontSize(11).fontColor($r('app.color.text_tertiary'))
+      }.layoutWeight(1).alignItems(HorizontalAlign.Start)
+    }.width('100%').padding(12)
+      .borderRadius(14)
+      .backgroundColor($r('app.color.surface'))
+      .border({ width: 1, color: $r('app.color.surface_outline') })
   }
 
   private homeContentSafeInset(): number {
     // HdsTabs floats over its content. Reserve a real no-content zone above
     // the capsule instead of tuning against one device screenshot.
     if (!this.isLandscapeWindow()) {
-      return Math.max(132, Math.min(176, this.viewportHeight * 0.10));
+      return Math.max(140, Math.min(180, this.viewportHeight * 0.10));
     }
-    return Math.max(144, Math.min(184, this.viewportHeight * 0.14));
-  }
-
-  private orbitDiameter(): number {
-    // Node height (button 58 + label ≈ 26) must fit inside the ring layer.
-    return this.orbitRadius() * 2 + 108 * this.tabletUiScale();
-  }
-
-  /**
-   * One circular type entry on the ring. angleDeg is clockwise from the top.
-   */
-  @Builder
-  FileTypeNode(icon: Resource, title: string, angleDeg: number, onOpen: () => void) {
-    Column({ space: 6 }) {
-      Button({ type: ButtonType.Circle }) {
-        SymbolGlyph(icon)
-          .fontSize(24 * this.tabletUiScale())
-          .fontColor([$r('app.color.accent')])
-      }
-      .width(58 * this.tabletUiScale()).height(58 * this.tabletUiScale())
-      .backgroundColor($r('app.color.surface'))
-      .border({ width: 1.5, color: $r('app.color.surface_outline') })
-      .shadow({ radius: 10, color: $r('app.color.shadow'), offsetY: 3 })
-      .accessibilityText(`选择${title}文件`)
-      .onClick(() => onOpen())
-      Text(title)
-        .fontSize(12 * this.tabletUiScale()).fontWeight(FontWeight.Medium)
-        .fontColor($r('app.color.text_secondary'))
-    }
-    .position({
-      x: this.orbitRadius() + 54 * this.tabletUiScale() +
-        Math.sin(angleDeg * Math.PI / 180) * this.orbitRadius(),
-      y: this.orbitRadius() + 54 * this.tabletUiScale() -
-        Math.cos(angleDeg * Math.PI / 180) * this.orbitRadius()
-    })
-    .markAnchor({ x: '50%', y: '50%' })
+    return Math.max(150, Math.min(190, this.viewportHeight * 0.16));
   }
 
   @Builder
@@ -3020,6 +3595,10 @@ struct Index {
             () => this.animateSettingsTo('watermark'))
           this.SettingsCategoryRow('文件处理', '设置默认行为',
             () => this.animateSettingsTo('files'))
+          if (this.motionHandAvailable) {
+            this.SettingsCategoryRow('操作习惯', '生成按钮靠左/靠右',
+              () => this.animateSettingsTo('hand'))
+          }
           this.SettingsCategoryRow('支持范围', '媒体与文档',
             () => this.animateSettingsTo('support'))
         }
@@ -3051,6 +3630,12 @@ struct Index {
               }
               .width('100%')
               .transition(this.settingsPageTransition())
+            } else if (this.settingsPage === 'hand') {
+              Column() {
+                this.SettingsHandPageContent()
+              }
+              .width('100%')
+              .transition(this.settingsPageTransition())
             } else if (this.settingsPage === 'support') {
               Column() {
                 this.SettingsSupportPageContent()
@@ -3070,6 +3655,9 @@ struct Index {
     .width('100%').height('100%')
     .padding({ left: 16, right: 16, top: 8, bottom: 16 })
     .alignItems(HorizontalAlign.Start)
+    // Solid surface matching HdsListItemCard — blurStyle alone did not
+    // produce a visible material under this sheet host.
+    .backgroundColor($r('app.color.surface'))
   }
 
   private settingsTitle(): string {
@@ -3077,6 +3665,7 @@ struct Index {
     if (this.settingsPage === 'visual') return '隐私打码';
     if (this.settingsPage === 'watermark') return '水印';
     if (this.settingsPage === 'files') return '文件处理';
+    if (this.settingsPage === 'hand') return '操作习惯';
     if (this.settingsPage === 'support') return '支持范围';
     return '默认设置';
   }
@@ -3092,12 +3681,13 @@ struct Index {
    * progress card can inherit the motion.
    */
   private resultOptionCardTransition(): TransitionEffect {
+    // Compact fade/slide — full-width x-exit left visible holes before
+    // the pane wrapper unmounted. Keep motion short so stacked cards reflow.
     return TransitionEffect.asymmetric(
-      TransitionEffect.OPACITY.combine(TransitionEffect.translate({ x: 96 }))
-        .animation({ duration: 320, curve: Curve.EaseOut }),
-      TransitionEffect.OPACITY.combine(
-        TransitionEffect.translate({ x: Math.max(420, this.viewportWidth) }))
-        .animation({ duration: 300, curve: Curve.EaseIn }));
+      TransitionEffect.OPACITY.combine(TransitionEffect.translate({ y: 12 }))
+        .animation({ duration: 220, curve: Curve.EaseOut }),
+      TransitionEffect.OPACITY.combine(TransitionEffect.translate({ y: 8 }))
+        .animation({ duration: 160, curve: Curve.EaseIn }));
   }
 
   private settingsPageTransition(): TransitionEffect {
@@ -3119,6 +3709,75 @@ struct Index {
     })
       .accessibilityText(`打开${title}设置`)
       .onClick(() => onOpen())
+  }
+
+  @Builder
+  SettingsHandPageContent() {
+    Column({ space: 8 }) {
+      Text('生成 / 分享按钮位置')
+        .fontSize(14).fontWeight(FontWeight.Medium)
+        .fontColor($r('app.color.text_secondary'))
+        .width('100%').padding({ left: 12, top: 14, bottom: 6 })
+      HdsListItemCard({
+        textItem: {
+          primaryText: { text: '自动（推荐）' },
+          secondaryText: {
+            text: this.detectedHand === 'left' ? '已识别：左手' :
+              (this.detectedHand === 'right' ? '已识别：右手' :
+                '跟随操作/握持手；需设备支持「智感握姿」')
+          }
+        },
+        suffixItem: new SuffixSwitch({
+          isCheck: this.fabHandMode === 'auto',
+          onChange: (checked: boolean) => {
+            if (checked) {
+              this.fabHandMode = 'auto';
+              if (this.detectedHand === 'left' || this.detectedHand === 'right') {
+                this.applyFabSide(this.detectedHand as HandSide, true);
+              }
+              this.saveFabHandPrefs();
+            }
+          }
+        })
+      })
+      HdsListItemCard({
+        textItem: {
+          primaryText: { text: '始终右手' },
+          secondaryText: { text: '按钮固定右下' }
+        },
+        suffixItem: new SuffixSwitch({
+          isCheck: this.fabHandMode === 'right',
+          onChange: (checked: boolean) => {
+            if (checked) {
+              this.fabHandMode = 'right';
+              this.applyFabSide('right', true);
+              this.saveFabHandPrefs();
+            }
+          }
+        })
+      })
+      HdsListItemCard({
+        textItem: {
+          primaryText: { text: '始终左手' },
+          secondaryText: { text: '按钮固定左下' }
+        },
+        suffixItem: new SuffixSwitch({
+          isCheck: this.fabHandMode === 'left',
+          onChange: (checked: boolean) => {
+            if (checked) {
+              this.fabHandMode = 'left';
+              this.applyFabSide('left', true);
+              this.saveFabHandPrefs();
+            }
+          }
+        })
+      })
+      Text(this.motionHandAvailable ?
+        '自动模式依赖 Multimodal Awareness Kit：操作手（API 15）与握持手/智感握姿（API 20）。' :
+        '当前设备未启用动作感知（无智感握姿开关、未授权，或为模拟器）。Tab 将保持居中；可手动固定左/右。')
+        .fontSize(11).fontColor($r('app.color.text_tertiary'))
+        .width('100%').padding({ left: 12, right: 12, top: 8 })
+    }.width('100%')
   }
 
   @Builder
@@ -3237,6 +3896,39 @@ struct Index {
       .width('100%').padding({ left: 12, top: 14, bottom: 6 })
   }
 
+  private replacementSheetHeight(): number {
+    const subtype: string = this.metadataFindingById(this.replacementFindingId)?.subtype ?? '';
+    if (subtype === 'GPS') return Math.min(420, this.viewportHeight * 0.55);
+    return 320;
+  }
+
+  private replacementSheetSubtitle(): string {
+    const finding: PrivacyFinding | undefined = this.metadataFindingById(this.replacementFindingId);
+    if (finding === undefined) return '';
+    const subtype: string = finding.subtype;
+    if (subtype === 'GPS') return '输入「纬度 | 经度」，例如 31.2304 | 121.4737';
+    if (subtype.startsWith('DOCX_') || subtype.startsWith('PDF_')) {
+      return '已默认填入文档中的原值，可改成任意字符串';
+    }
+    return '已默认填入照片中的原值，可改成任意字符串';
+  }
+
+  private replacementPlaceholder(): string {
+    const finding: PrivacyFinding | undefined = this.metadataFindingById(this.replacementFindingId);
+    const subtype: string = finding?.subtype ?? '';
+    if (subtype === 'GPS') return '31.2304 | 121.4737';
+    if (subtype === 'DOCX_AUTHOR' || subtype === 'PDF_AUTHOR') return '作者姓名';
+    if (subtype === 'DOCX_COMPANY') return '公司名称';
+    if (subtype === 'DOCX_TITLE' || subtype === 'PDF_TITLE') return '文档标题';
+    if (subtype === 'DOCX_SUBJECT' || subtype === 'PDF_SUBJECT') return '主题';
+    if (subtype === 'DEVICE_MAKE') return '例如 HUAWEI';
+    if (subtype === 'DEVICE_MODEL') return '例如 MatePad Mini';
+    if (subtype === 'AUTHOR') return '作者';
+    if (subtype === 'COPYRIGHT') return '版权信息';
+    if (subtype === 'DESCRIPTION') return '描述文字';
+    return '替换值';
+  }
+
   @Builder
   MetadataReplacementSheet() {
     Column({ space: 18 }) {
@@ -3244,13 +3936,17 @@ struct Index {
         Text(this.metadataFindingById(this.replacementFindingId)?.subtype === 'GPS' ? '替换拍摄地点' :
           `替换${this.metadataFindingById(this.replacementFindingId)?.title.replace('包含', '') ?? '元数据'}`)
           .fontSize(22).fontWeight(FontWeight.Bold).fontColor($r('app.color.text_primary'))
-        Text(this.metadataFindingById(this.replacementFindingId)?.subtype === 'GPS' ?
-          '输入“纬度 | 经度”，已默认填入照片原值' : '已默认填入照片中的原值')
+        Text(this.replacementSheetSubtitle())
           .fontSize(12).fontColor($r('app.color.text_tertiary'))
       }.width('100%').alignItems(HorizontalAlign.Start)
-      TextInput({ placeholder: '替换值', text: this.replacementDraft })
+      TextInput({ placeholder: this.replacementPlaceholder(), text: this.replacementDraft })
         .height(48).fontSize(15)
         .onChange((value: string) => this.replacementDraft = value)
+      if (this.metadataFindingById(this.replacementFindingId)?.subtype === 'GPS') {
+        Text('格式：纬度 | 经度（十进制度）。保存前会校验。')
+          .fontSize(11).fontColor($r('app.color.text_tertiary'))
+          .width('100%')
+      }
       Row({ space: 10 }) {
         Button('取消', { type: ButtonType.Capsule })
           .layoutWeight(1).height(44).fontColor($r('app.color.text_primary'))
@@ -3458,12 +4154,12 @@ struct Index {
     Flex({ direction: this.useTwoPaneLayout() ? FlexDirection.Row : FlexDirection.Column,
       wrap: FlexWrap.NoWrap, justifyContent: FlexAlign.Start, alignItems: ItemAlign.Start }) {
       Column({ space: 12 }) {
-      // Documents/AV get a compact type card instead of a huge icon-only
-      // placeholder; all preview overlays are image-only.
+      if (this.usesFullBleedPreview()) {
+      // Full-bleed pane: height is owned ONLY by this frame. Children fill 100%.
       Stack({ alignContent: Alignment.TopStart }) {
         if (this.trackedFileKind === FileKind.IMAGE) {
           Image(this.currentPreviewUri())
-            .width('100%').height(this.previewHeight())
+            .width('100%').height('100%')
             .objectFit(this.useCoverPreview() ? ImageFit.Cover : ImageFit.Contain)
             .onAreaChange((_oldValue: Area, newValue: Area) => {
               this.previewSurfaceWidthState =
@@ -3491,19 +4187,32 @@ struct Index {
           }
         } else if (this.hasVideoPreview()) {
           Image(this.mediaPreviewPixelMap)
-            .width('100%').height(this.mediaPreviewHeight()).objectFit(ImageFit.Contain)
-        } else if (this.trackedFileKind === FileKind.PDF && this.pdfPreviewPixelMap !== undefined) {
-          // PDF watermark preview: page 1 rendered by PDF Kit with the same
-          // tiled-text overlay style as the photo watermark. Read-only.
+            .width('100%').height('100%').objectFit(ImageFit.Contain)
+        } else if (this.pdfPreviewPixelMap !== undefined) {
+          // PDF page-1 render + watermark overlay.
           Stack({ alignContent: Alignment.TopStart }) {
             Image(this.pdfPreviewPixelMap)
               .width('100%').height('100%').objectFit(ImageFit.Contain)
             this.PdfWatermarkPreviewOverlay()
           }
-          .width('100%')
-          .height(this.previewHeight())
-          .clip(true)
-        } else if (this.useDocumentWorkspace()) {
+          .width('100%').height('100%')
+        }
+      }
+      .width('100%')
+      .height(this.previewPaneHeight())
+      .margin({ top: 8, bottom: this.useTwoPaneLayout() ? 0 : 14 })
+      .borderRadius(16 * this.tabletUiScale())
+      .backgroundColor($r('app.color.surface'))
+      .border({ width: 1.5, color: $r('app.color.surface_outline') })
+      .clip(true)
+      .onClick(() => {
+        if (this.isAvSession()) this.openFullFilePreview();
+      })
+      } else {
+      // Compact type card / document workspace: natural height, never forced
+      // to a media pane size.
+      Stack({ alignContent: Alignment.TopStart }) {
+        if (this.useDocumentWorkspace()) {
           this.DocumentFileWorkspace()
         } else {
           Row({ space: 14 }) {
@@ -3529,20 +4238,8 @@ struct Index {
         }
       }
       .width('100%')
-      .height(this.trackedFileKind === FileKind.IMAGE ? this.previewHeight() :
-        (this.hasVideoPreview() ? this.mediaPreviewHeight() :
-          ((this.useTwoPaneLayout() && !this.isAvSession()) ? this.previewHeight() : 86)))
-      .margin({ top: 8, bottom: 6 })
-      .borderRadius(this.trackedFileKind === FileKind.IMAGE || this.hasVideoPreview() ?
-        16 * this.tabletUiScale() : 0)
-      .backgroundColor(this.trackedFileKind === FileKind.IMAGE || this.hasVideoPreview() ?
-        $r('app.color.surface') : Color.Transparent)
-      .border({ width: this.trackedFileKind === FileKind.IMAGE || this.hasVideoPreview() ? 1.5 : 0,
-        color: $r('app.color.surface_outline') })
-      .clip(this.trackedFileKind === FileKind.IMAGE || this.hasVideoPreview())
-      .onClick(() => {
-        if (this.isAvSession()) this.openFullFilePreview();
-      })
+      .margin({ top: 8, bottom: this.useTwoPaneLayout() ? 0 : 14 })
+      }
       // Portrait only. Two-pane layouts keep the left pane to preview (+ the
       // compare toggle when ready): the inspector pane already carries the
       // same information (metadata card in RESULT, 处理摘要 in READY), and a
@@ -3552,11 +4249,14 @@ struct Index {
         this.status !== PageStatus.SANITIZING && this.status !== PageStatus.ERROR) {
         this.InspectionSummaryCard()
       }
-      if (this.status === PageStatus.READY && this.visibleVisualFindings().length > 0) {
+      if (this.shouldShowSafeCompare()) {
         TabSegmentButtonV2({
           items: new SegmentButtonV2Items([{ text: '原图' }, { text: '安全副本' }]),
           selectedIndex: this.showSafePreview ? 1 : 0,
-          $selectedIndex: (index: number) => { this.showSafePreview = index === 1; },
+          $selectedIndex: (index: number) => {
+            this.showSafePreview = index === 1;
+            this.syncPdfPreview();
+          },
           itemSelectedBackgroundColor: ColorMetrics.resourceColor($r('app.color.accent')),
           itemFontColor: ColorMetrics.resourceColor($r('app.color.text_primary')),
           itemSelectedFontColor: ColorMetrics.resourceColor($r('app.color.on_accent')),
@@ -3567,6 +4267,7 @@ struct Index {
             .animation({ duration: 240, curve: Curve.Friction }))
       }
       if (this.selectedUris.length > 1 && !this.useDocumentWorkspace()) {
+        // Always LTR: 上一张 left, 下一张 right — independent of handedness.
         Row() {
           Button({ type: ButtonType.Circle }) {
             SymbolGlyph($r('sys.symbol.chevron_left')).fontSize(22)
@@ -3627,7 +4328,9 @@ struct Index {
         // plain animated translate/opacity; after the exit completes
         // (onFinish) optionsRemoved unmounts it so the space backfills.
         if (!this.optionsRemoved) {
-        Column({ space: 18 * this.tabletUiScale() }) {
+        // Uniform gap between *visible* cards only. Capabilities that are
+        // off simply do not render — no empty shells, so spacing stays even.
+        Column({ space: 12 * this.tabletUiScale() }) {
         if (this.capabilityWarnings.length > 0) {
           Column({ space: 6 }) {
             ForEach(this.capabilityWarnings, (warning: string) => {
@@ -3641,18 +4344,24 @@ struct Index {
           }
           .width('100%').padding({ left: 14, right: 14, top: 10, bottom: 10 })
           .borderRadius(16).backgroundColor($r('app.color.warning_soft'))
-          .transition(TransitionEffect.OPACITY
-            .animation({ duration: 240, curve: Curve.Friction }))
+          .transition(this.resultOptionCardTransition())
         }
 
+          if (this.visibleMetadataFindings().length > 0) {
           Row({ space: 12 }) {
-            Column({ space: 3 }) {
-              Text(`元数据风险 ${this.visibleMetadataFindings().length} 项`)
-                .fontSize(15 * this.tabletUiScale()).fontWeight(FontWeight.Medium)
-                .fontColor($r('app.color.text_primary'))
-            }.layoutWeight(1).alignItems(HorizontalAlign.Start)
-            Text(this.showMetadataDetails ? '收起' : '查看')
-              .fontSize(13 * this.tabletUiScale()).fontColor($r('app.color.accent'))
+            if (this.isLeftHand()) {
+              Text(this.showMetadataDetails ? '收起' : '查看')
+                .fontSize(13 * this.tabletUiScale()).fontColor($r('app.color.accent'))
+            }
+            Text(`元数据风险 ${this.visibleMetadataFindings().length} 项`)
+              .fontSize(15 * this.tabletUiScale()).fontWeight(FontWeight.Medium)
+              .fontColor($r('app.color.text_primary'))
+              .layoutWeight(1)
+              .textAlign(this.isLeftHand() ? TextAlign.End : TextAlign.Start)
+            if (!this.isLeftHand()) {
+              Text(this.showMetadataDetails ? '收起' : '查看')
+                .fontSize(13 * this.tabletUiScale()).fontColor($r('app.color.accent'))
+            }
           }.width('100%').padding(14).borderRadius(16).backgroundColor($r('app.color.surface'))
             .border({ width: 1.5, color: $r('app.color.surface_outline') })
             .transition(this.resultOptionCardTransition())
@@ -3661,7 +4370,8 @@ struct Index {
                 this.showMetadataDetails = !this.showMetadataDetails;
               });
             })
-          if (this.showMetadataDetails) {
+          }
+          if (this.showMetadataDetails && this.visibleMetadataFindings().length > 0) {
             Column() {
               ForEach(this.visibleMetadataFindings(), (finding: PrivacyFinding) => {
                 this.MetadataFindingRow(finding)
@@ -3677,15 +4387,26 @@ struct Index {
             this.PdfWatermarkCard()
           }
           if (this.featureMode === FeatureMode.PRIVACY && this.visibleVisualFindings().length > 0 &&
+            this.trackedFileKind === FileKind.IMAGE && this.currentFaceQrSupported() &&
             this.statusNotReady()) {
             Row({ space: 12 }) {
-              Column({ space: 3 }) {
+              if (this.isLeftHand()) {
+                Button('全部打码').height(38).fontSize(13).borderRadius(19)
+                  .padding({ left: 16, right: 16 })
+                  .fontColor($r('app.color.accent')).backgroundColor($r('app.color.accent_soft'))
+                  .onClick(() => this.applyRecommendedProtection())
                 Text('推荐保护').fontSize(15).fontWeight(FontWeight.Medium)
                   .fontColor($r('app.color.text_primary'))
-              }.layoutWeight(1).alignItems(HorizontalAlign.Start)
-              Button('全部打码').height(38).fontSize(13).borderRadius(19)
-                .fontColor($r('app.color.accent')).backgroundColor($r('app.color.accent_soft'))
-                .onClick(() => this.applyRecommendedProtection())
+                  .layoutWeight(1).textAlign(TextAlign.End)
+              } else {
+                Text('推荐保护').fontSize(15).fontWeight(FontWeight.Medium)
+                  .fontColor($r('app.color.text_primary'))
+                  .layoutWeight(1)
+                Button('全部打码').height(38).fontSize(13).borderRadius(19)
+                  .padding({ left: 16, right: 16 })
+                  .fontColor($r('app.color.accent')).backgroundColor($r('app.color.accent_soft'))
+                  .onClick(() => this.applyRecommendedProtection())
+              }
             }.width('100%').padding(12).borderRadius(16).backgroundColor($r('app.color.surface'))
               .border({ width: 1.5, color: $r('app.color.surface_outline') })
               .transition(this.resultOptionCardTransition())
@@ -3700,22 +4421,39 @@ struct Index {
               .width('100%').padding({ left: 4, right: 4 })
             if (this.visibleVisualFindings().some((finding: PrivacyFinding) => finding.region !== undefined)) {
               Row() {
-                Column({ space: 3 }) {
-                  Text('打码方式').fontSize(15).fontWeight(FontWeight.Medium)
-                    .fontColor($r('app.color.text_primary'))
-                  Text('智能推荐会按风险选择强度').fontSize(11).fontColor($r('app.color.text_tertiary'))
-                }.alignItems(HorizontalAlign.Start)
-                Blank()
-                Select([
-                  { value: '智能推荐' },
-                  { value: '强模糊' },
-                  { value: '马赛克' },
-                  { value: '纯色遮盖' }
-                ])
-                  .selected(this.redactionStyleIndex())
-                  .value(this.redactionStyleLabel())
-                  .font({ size: 13 })
-                  .onSelect((index: number) => this.setRedactionStyle(index))
+                if (this.isLeftHand()) {
+                  Select([
+                    { value: '智能推荐' },
+                    { value: '强模糊' },
+                    { value: '马赛克' },
+                    { value: '纯色遮盖' }
+                  ])
+                    .selected(this.redactionStyleIndex())
+                    .value(this.redactionStyleLabel())
+                    .font({ size: 13 })
+                    .onSelect((index: number) => this.setRedactionStyle(index))
+                  Column({ space: 3 }) {
+                    Text('打码方式').fontSize(15).fontWeight(FontWeight.Medium)
+                      .fontColor($r('app.color.text_primary'))
+                    Text('智能推荐会按风险选择强度').fontSize(11).fontColor($r('app.color.text_tertiary'))
+                  }.layoutWeight(1).alignItems(HorizontalAlign.End)
+                } else {
+                  Column({ space: 3 }) {
+                    Text('打码方式').fontSize(15).fontWeight(FontWeight.Medium)
+                      .fontColor($r('app.color.text_primary'))
+                    Text('智能推荐会按风险选择强度').fontSize(11).fontColor($r('app.color.text_tertiary'))
+                  }.layoutWeight(1).alignItems(HorizontalAlign.Start)
+                  Select([
+                    { value: '智能推荐' },
+                    { value: '强模糊' },
+                    { value: '马赛克' },
+                    { value: '纯色遮盖' }
+                  ])
+                    .selected(this.redactionStyleIndex())
+                    .value(this.redactionStyleLabel())
+                    .font({ size: 13 })
+                    .onSelect((index: number) => this.setRedactionStyle(index))
+                }
               }
               .width('100%').padding(12).borderRadius(16).backgroundColor($r('app.color.surface'))
               .border({ width: 1.5, color: $r('app.color.surface_outline') })
@@ -3753,26 +4491,46 @@ struct Index {
         // Reachability spacer: guarantees the last card can scroll above the
         // floating capsule tab bar and the FAB. Horizontal inset lives on the
         // content, not the Scroll, so the scrollbar hugs the device edge.
-        if (this.status === PageStatus.RESULT && this.isImageSession() &&
-          (this.currentTextWatermarkSupported() || this.currentImageWatermarkSupported())) {
+        if (this.status === PageStatus.RESULT && this.isImageSession()) {
           Column({ space: 10 }) {
             Row() {
+              if (this.isLeftHand()) {
+                Toggle({ type: ToggleType.Switch, isOn: this.watermarkApplied })
+                  .onChange((value: boolean) => {
+                    this.getUIContext().animateTo({ duration: 280, curve: Curve.Friction }, () => {
+                      this.watermarkApplied = value;
+                    });
+                    if (value && this.purposeWatermark.trim().length === 0 &&
+                      this.imageWatermarkUri.length === 0) {
+                      this.purposeWatermark = this.watermarkSlots[0];
+                    }
+                  })
+              }
               Column({ space: 3 }) {
                 Text('水印').fontSize(15).fontWeight(FontWeight.Medium)
                   .fontColor($r('app.color.text_primary'))
-                Text(this.watermarkApplied ? '水印与隐私清理会一并写入副本' : '开启后为副本叠加水印')
+                Text(this.watermarkApplied ?
+                  (this.currentSupportsPixelWatermark() ?
+                    '水印与隐私清理会一并写入副本' :
+                    '当前格式仅清理元数据，水印不会写入副本') :
+                  (this.currentSupportsPixelWatermark() ?
+                    '开启后为副本叠加水印' :
+                    '此格式不支持像素水印，可清理元数据'))
                   .fontSize(11).fontColor($r('app.color.text_tertiary'))
-              }.layoutWeight(1).alignItems(HorizontalAlign.Start)
-              Toggle({ type: ToggleType.Switch, isOn: this.watermarkApplied })
-                .onChange((value: boolean) => {
-                  this.getUIContext().animateTo({ duration: 280, curve: Curve.Friction }, () => {
-                    this.watermarkApplied = value;
-                  });
-                  if (value && this.purposeWatermark.trim().length === 0 &&
-                    this.imageWatermarkUri.length === 0) {
-                    this.purposeWatermark = this.watermarkSlots[0];
-                  }
-                })
+              }.layoutWeight(1)
+                .alignItems(this.isLeftHand() ? HorizontalAlign.End : HorizontalAlign.Start)
+              if (!this.isLeftHand()) {
+                Toggle({ type: ToggleType.Switch, isOn: this.watermarkApplied })
+                  .onChange((value: boolean) => {
+                    this.getUIContext().animateTo({ duration: 280, curve: Curve.Friction }, () => {
+                      this.watermarkApplied = value;
+                    });
+                    if (value && this.purposeWatermark.trim().length === 0 &&
+                      this.imageWatermarkUri.length === 0) {
+                      this.purposeWatermark = this.watermarkSlots[0];
+                    }
+                  })
+              }
             }.width('100%')
             if (this.watermarkApplied) {
               Row() {
@@ -3822,34 +4580,13 @@ struct Index {
                   .fontSize(12).fontColor($r('app.color.text_tertiary'))
               }.width('100%')
               Row({ space: 10 }) {
-                Text('文字颜色').fontSize(13).fontColor($r('app.color.text_secondary')).layoutWeight(1)
-                Stack() {
-                  Row().width(28).height(28).borderRadius(14).backgroundColor('#FFFFFF')
-                    .border({ width: 1.5, color: $r('app.color.surface_outline') })
-                  if (this.watermarkColor === '#FFFFFF') {
-                    SymbolGlyph($r('sys.symbol.checkmark')).fontSize(13).fontColor([Color.Black])
-                  }
-                }.width(34).height(34).accessibilityText('白色水印')
-                  .onClick(() => this.setWatermarkColorMode(0))
-                Stack() {
-                  Row().width(28).height(28).borderRadius(14).backgroundColor('#000000')
-                    .border({ width: 1, color: $r('app.color.surface_outline') })
-                  if (this.watermarkColor === '#000000') {
-                    SymbolGlyph($r('sys.symbol.checkmark')).fontSize(13).fontColor([Color.White])
-                  }
-                }.width(34).height(34).accessibilityText('黑色水印')
-                  .onClick(() => this.setWatermarkColorMode(1))
-                Button({ type: ButtonType.Capsule }) {
-                  Row({ space: 7 }) {
-                    Row().width(20).height(20).borderRadius(7)
-                      .backgroundColor(this.watermarkColor)
-                      .border({ width: 1, color: $r('app.color.surface_outline') })
-                    Text('更多颜色').fontSize(12).fontColor($r('app.color.accent'))
-                  }
+                if (this.isLeftHand()) {
+                  this.WatermarkColorControls()
+                } else {
+                  Text('文字颜色').fontSize(13).fontColor($r('app.color.text_secondary'))
+                    .layoutWeight(1)
+                  this.WatermarkColorControls()
                 }
-                .height(36).padding({ left: 11, right: 11 })
-                .backgroundColor($r('app.color.accent_soft'))
-                .onClick(() => this.openWatermarkColorPicker())
               }.width('100%')
               Divider().color($r('app.color.progress_track')).margin({ top: 4, bottom: 4 })
               Row({ space: 12 }) {
@@ -3936,7 +4673,7 @@ struct Index {
 
         }
         .width('100%')
-        .translate({ x: this.optionsOut ? '120%' : '0%' })
+        .translate({ x: this.optionsOut ? '36%' : '0%' })
         .opacity(this.optionsOut ? 0 : 1)
         .hitTestBehavior(this.optionsOut ? HitTestMode.None : HitTestMode.Default)
         }
@@ -3946,7 +4683,8 @@ struct Index {
               .fontColor($r('app.color.text_secondary')).width('100%').textAlign(TextAlign.Start)
             if (this.featureMode === FeatureMode.PRIVACY) {
               Row() {
-                Text(this.isDocumentSession() ? '文档元数据' : '图片元数据')
+                Text(this.isDocumentSession() ? '文档元数据' :
+                  (this.isAvSession() ? '媒体容器元数据' : '图片元数据'))
                   .fontSize(15).fontColor($r('app.color.text_primary'))
                 Blank()
                 Text(this.removedEntryCount > 0 ?
@@ -3967,14 +4705,19 @@ struct Index {
               Blank()
               Text(this.safeCopyDetails()).fontSize(13).fontColor($r('app.color.text_secondary'))
             }.width('100%')
-            if (this.purposeWatermark.length > 0) {
+            // Only claim a write when this session actually applied a watermark
+            // to a format that supports it. A leftover text/URI from defaults
+            // must not read as “已写入副本”.
+            if (this.watermarkApplied && this.currentTextWatermarkSupported() &&
+              this.purposeWatermark.trim().length > 0 && this.hasSafePreviewForCurrent()) {
               Row() {
                 Text('文字水印').fontSize(15).fontColor($r('app.color.text_primary'))
                 Blank()
                 Text('已写入副本').fontSize(13).fontColor($r('app.color.accent'))
               }.width('100%')
             }
-            if (this.imageWatermarkUri.length > 0) {
+            if (this.watermarkApplied && this.currentImageWatermarkSupported() &&
+              this.imageWatermarkUri.length > 0 && this.hasSafePreviewForCurrent()) {
               Row() {
                 Text('图片水印').fontSize(15).fontColor($r('app.color.text_primary'))
                 Blank()
@@ -3993,10 +4736,15 @@ struct Index {
       .padding({ left: 20, right: 20 })
       }
             .width(this.inspectorPaneWidth())
-      .margin({ top: this.useTwoPaneLayout() ? 0 : 8 })
+      .margin({ top: this.useTwoPaneLayout() ? 0 : 12 })
       .layoutWeight(this.useTwoPaneLayout() ? 0 : 1)
       .height(this.useTwoPaneLayout() ? '100%' : '100%')
-      .padding({ left: this.useTwoPaneLayout() ? 10 : 0 })
+      // Portrait: extra top inset so the first card sits clear of the preview
+      // stack. Landscape/two-pane: extra left inset against the preview pane.
+      .padding({
+        left: this.useTwoPaneLayout() ? 16 : 0,
+        top: this.useTwoPaneLayout() ? 0 : 4
+      })
       .scrollBar(BarState.Auto)
       // Spring bounce on a plain content list reads as flicker while
       // scrolling repeatedly; clamp to the edge instead.
@@ -4004,7 +4752,10 @@ struct Index {
       .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.BOTTOM])
       }
       .align(Alignment.Top)
-      if (!this.isAvSession() || this.hasSanitizableFiles()) {
+      if (this.status === PageStatus.RESULT || this.status === PageStatus.READY ||
+        this.status === PageStatus.SANITIZING) {
+        // One shared action slot for every file kind. Scan-only types keep the
+        // control visible (disabled) so the layout frame never changes.
         Button({ type: ButtonType.Circle }) {
           SymbolGlyph(this.status === PageStatus.READY ? $r('sys.symbol.paperplane_fill') :
             $r('sys.symbol.plus'))
@@ -4012,18 +4763,31 @@ struct Index {
             .fontColor([$r('app.color.on_accent')])
         }
         .width(56).height(56)
-        .backgroundColor($r('app.color.accent'))
+        .backgroundColor(this.fabEnabled() ? $r('app.color.accent') : $r('app.color.surface_outline'))
+        .enabled(this.status !== PageStatus.SANITIZING && this.fabEnabled())
+        .opacity(this.status === PageStatus.SANITIZING || !this.fabEnabled() ? 0.45 : 1)
         .shadow({ radius: 12, color: $r('app.color.shadow'), offsetY: 4 })
         .margin({ right: 4, bottom: this.useTwoPaneLayout() ? 40 : 24 })
+        .translate({ x: this.fabOnLeft ? this.fabTravelX() : 0 })
         .transition(TransitionEffect.OPACITY.combine(TransitionEffect.scale({ x: 0.6, y: 0.6 }))
           .animation({ duration: 280, curve: Curve.Friction }))
-        .accessibilityText(this.status === PageStatus.READY ? '分享副本' : '生成安全副本')
+        .accessibilityText(this.status === PageStatus.READY ? '分享副本' :
+          (this.hasSanitizableFiles() ? '生成安全副本' : '当前类型仅支持检查'))
         .onClick(() => {
           if (this.status === PageStatus.READY) {
-            this.shareAgain();
-          } else {
-            this.createSafeCopy();
+            if (this.sanitizedFiles.length > 0) this.shareAgain();
+            return;
           }
+          if (this.status !== PageStatus.RESULT) return;
+          if (!this.hasSanitizableFiles()) {
+            this.getUIContext().getPromptAction().showToast({
+              message: this.isAudioOnlySession() ?
+                '音频当前仅支持元数据检查，不生成清理副本' :
+                '当前类型暂不支持生成清理副本'
+            });
+            return;
+          }
+          this.createSafeCopy();
         })
       }
     }
@@ -4194,7 +4958,7 @@ struct Index {
       preferType: SheetType.BOTTOM,
       showClose: false,
       dragBar: true,
-      height: 300,
+      height: this.replacementSheetHeight(),
       width: Math.max(200, Math.min(520, this.viewportWidth - 24)),
       radius: LengthMetrics.vp(32),
       maskColor: $r('app.color.sheet_mask'),

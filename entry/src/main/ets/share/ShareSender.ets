@@ -56,6 +56,8 @@ export class ShareSender {
       const paths: string[] = files[index].cleanupPaths.length > 0 ?
         files[index].cleanupPaths : [files[index].path];
       for (let pathIndex: number = 0; pathIndex < paths.length; pathIndex++) {
+        // Share is finished — drop the stale-cleanup protection, then delay-remove.
+        manager.release(paths[pathIndex]);
         manager.scheduleRemoval(paths[pathIndex], delayMs);
       }
     }

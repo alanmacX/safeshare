@@ -1,185 +1,95 @@
 import { common } from '@kit.AbilityKit';
-import { dataSharePredicates } from '@kit.ArkData';
-import { fileIo, fileUri } from '@kit.CoreFileKit';
-import { photoAccessHelper } from '@kit.MediaLibraryKit';
-import { FindingCategory, PrivacyFinding, PrivacyScanResult, RedactionAction, SanitizedFile } from '../models/PrivacyModels';
-import { MetadataPolicy } from '../metadata/MetadataPolicy';
-import { MetadataScanner } from '../metadata/MetadataScanner';
-import { MetadataSanitizer } from '../metadata/MetadataSanitizer';
-import { TempFileManager } from '../storage/TempFileManager';
-import { AvPrivacyTool } from './AvPrivacyProcessor';
+import { fileIo } from '@kit.CoreFileKit';
+import { MovingPhotoContainer } from './MovingPhotoContainer';
 
-/** Dedicated image+video pipeline for picker-authorized MovingPhoto assets. */
+/**
+ * MovingPhoto gate. Detection only — SafeShare refuses motion photos.
+ *
+ * Probe must stay cheap: a 50-photo batch previously opened each file and
+ * read it end-to-end. We only sniff a small head for motion XMP / JPEG SOI
+ * and skip the rest unless that sniff already says “motion”.
+ */
 export class MovingPhotoPrivacyTool {
-  private context: common.UIAbilityContext;
-  private tempFiles: TempFileManager;
-  private imageScanner: MetadataScanner = new MetadataScanner();
-  private imageSanitizer: MetadataSanitizer;
-  private videoTool: AvPrivacyTool;
+  private static readonly SNIFF_BYTES: number = 64 * 1024;
+  private cache: Map<string, boolean> = new Map();
 
   constructor(context: common.UIAbilityContext) {
-    this.context = context;
-    this.tempFiles = new TempFileManager(context);
-    this.imageSanitizer = new MetadataSanitizer(context);
-    this.videoTool = new AvPrivacyTool(context);
   }
 
   async isMovingPhoto(uri: string): Promise<boolean> {
-    const asset: photoAccessHelper.PhotoAsset | undefined = await this.assetForUri(uri);
-    if (asset === undefined) return false;
-    try {
-      return Number(asset.get(photoAccessHelper.PhotoKeys.PHOTO_SUBTYPE)) ===
-        photoAccessHelper.PhotoSubtype.MOVING_PHOTO;
-    } catch (_) {
-      return false;
-    }
-  }
-
-  async scan(uri: string): Promise<PrivacyScanResult> {
-    const exported: string[] = await this.exportComponents(uri);
-    try {
-      return await this.scanComponents(uri, exported[0], exported[1]);
-    } finally {
-      await this.removeAll(exported);
-    }
-  }
-
-  scanLocal(uri: string, paths: string[]): Promise<PrivacyScanResult> {
-    this.assertLocalComponents(paths);
-    return this.scanComponents(uri, paths[0], paths[1]);
-  }
-
-  async sanitize(uri: string, actions: RedactionAction[], policy: MetadataPolicy): Promise<SanitizedFile> {
-    if (actions.length > 0 || policy.purposeWatermark.trim().length > 0 || policy.imageWatermarkUri.length > 0) {
-      throw new Error('MOVING_PHOTO_VISUAL_EDIT_UNSUPPORTED');
-    }
-    const exported: string[] = await this.exportComponents(uri);
-    try {
-      return await this.sanitizeComponents(exported[0], exported[1], policy);
-    } finally {
-      await this.removeAll(exported);
-    }
-  }
-
-  sanitizeLocal(paths: string[], actions: RedactionAction[], policy: MetadataPolicy): Promise<SanitizedFile> {
-    if (actions.length > 0 || policy.purposeWatermark.trim().length > 0 || policy.imageWatermarkUri.length > 0) {
-      throw new Error('MOVING_PHOTO_VISUAL_EDIT_UNSUPPORTED');
-    }
-    this.assertLocalComponents(paths);
-    return this.sanitizeComponents(paths[0], paths[1], policy);
-  }
-
-  private async scanComponents(uri: string, imagePath: string, videoPath: string): Promise<PrivacyScanResult> {
-    const imageResult: PrivacyScanResult = await this.imageScanner.scan(fileUri.getUriFromPath(imagePath));
-    const videoResult: PrivacyScanResult = await this.videoTool.scan(fileUri.getUriFromPath(videoPath));
-    const findings: PrivacyFinding[] = [];
-    this.appendFindings(findings, imageResult.findings, 'moving-image-');
-    this.appendFindings(findings, videoResult.findings, 'moving-video-');
-    const result: PrivacyScanResult = new PrivacyScanResult(uri, findings);
-    result.mimeType = 'application/x-harmony-moving-photo';
-    result.pixelWidth = imageResult.pixelWidth;
-    result.pixelHeight = imageResult.pixelHeight;
-    result.isMovingPhoto = true;
-    result.visualEditsSupported = false;
-    result.capabilityWarnings = ['动态照片已分别检查封面和视频；当前只支持 metadata，不执行水印、人脸或二维码处理'];
+    const cached: boolean | undefined = this.cache.get(uri);
+    if (cached !== undefined) return cached;
+    const result: boolean = await this.detect(uri);
+    this.cache.set(uri, result);
     return result;
   }
 
-  private async sanitizeComponents(imagePath: string, videoPath: string,
-    policy: MetadataPolicy): Promise<SanitizedFile> {
-    let imageFile: SanitizedFile | undefined = undefined;
-    let videoFile: SanitizedFile | undefined = undefined;
+  assertSupported(): void {
+    throw new Error('MOVING_PHOTO_UNSUPPORTED');
+  }
+
+  private async detect(uri: string): Promise<boolean> {
+    const head: Uint8Array | undefined = await this.readRange(uri, 0,
+      MovingPhotoPrivacyTool.SNIFF_BYTES);
+    if (head === undefined) return false;
+    // Still JPEG/PNG/HEIF without motion XMP → not a motion photo. No tail read.
+    if (MovingPhotoContainer.hasMotionXmp(head)) return true;
+    if (MovingPhotoContainer.looksLikeMovingPhoto(head)) return true;
+    // Composite whose XMP sits past the sniff window is rare; only then
+    // inspect a short tail for EOI+ftyp.
+    if (MovingPhotoContainer.jpegStillEnd(head) === 0) {
+      const size: number = await this.fileSize(uri);
+      if (size > MovingPhotoPrivacyTool.SNIFF_BYTES) {
+        const tail: Uint8Array | undefined = await this.readRange(uri,
+          Math.max(0, size - 32 * 1024), 32 * 1024);
+        if (tail !== undefined && MovingPhotoContainer.looksLikeMovingPhoto(tail)) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  private async fileSize(uri: string): Promise<number> {
+    let source: fileIo.File | undefined = undefined;
     try {
-      imageFile = await this.imageSanitizer.sanitize(fileUri.getUriFromPath(imagePath), [], policy);
-      videoFile = await this.videoTool.sanitize(fileUri.getUriFromPath(videoPath), true);
-      const localMovingPhoto: photoAccessHelper.MovingPhoto =
-        await photoAccessHelper.MediaAssetManager.loadMovingPhoto(this.context, imageFile.uri, videoFile.uri);
-      const verification: PrivacyScanResult = new PrivacyScanResult('', []);
-      this.appendFindings(verification.findings, imageFile.verification.findings, 'moving-image-');
-      this.appendFindings(verification.findings, videoFile.verification.findings, 'moving-video-');
-      if (verification.findings.length > 0) throw new Error('MOVING_PHOTO_METADATA_REMAINS');
-      const result = new SanitizedFile(imageFile.path, localMovingPhoto.getUri(), verification,
-        'openharmony.moving-photo', 'application/x-harmony-moving-photo');
-      result.fileKind = 'IMAGE';
-      result.isMovingPhoto = true;
-      result.movingPhotoRef = localMovingPhoto;
-      result.cleanupPaths = [imageFile.path, videoFile.path];
-      result.byteSize = imageFile.byteSize + videoFile.byteSize;
-      return result;
-    } catch (error) {
-      if (imageFile !== undefined) await this.tempFiles.remove(imageFile.path);
-      if (videoFile !== undefined) await this.tempFiles.remove(videoFile.path);
-      throw error as Error;
+      source = await fileIo.open(uri, fileIo.OpenMode.READ_ONLY);
+      return fileIo.statSync(source.fd).size;
+    } catch (_) {
+      return 0;
+    } finally {
+      try {
+        if (source !== undefined) fileIo.closeSync(source);
+      } catch (_) {}
     }
   }
 
-  private assertLocalComponents(paths: string[]): void {
-    if (paths.length < 2 || !fileIo.accessSync(paths[0]) || !fileIo.accessSync(paths[1])) {
-      throw new Error('MOVING_PHOTO_LOCAL_COMPONENTS_UNAVAILABLE');
-    }
-  }
-
-  private async exportComponents(uri: string): Promise<string[]> {
-    const asset: photoAccessHelper.PhotoAsset | undefined = await this.assetForUri(uri);
-    if (asset === undefined || Number(asset.get(photoAccessHelper.PhotoKeys.PHOTO_SUBTYPE)) !==
-      photoAccessHelper.PhotoSubtype.MOVING_PHOTO) throw new Error('MOVING_PHOTO_ASSET_UNAVAILABLE');
-    const movingPhoto: photoAccessHelper.MovingPhoto = await this.requestMovingPhoto(asset);
-    const imagePath: string = this.tempFiles.createPath('moving-image');
-    const videoPath: string = this.tempFiles.createPath('moving-video');
+  private async readRange(uri: string, offset: number, length: number): Promise<Uint8Array | undefined> {
+    let source: fileIo.File | undefined = undefined;
     try {
-      await movingPhoto.requestContent(fileUri.getUriFromPath(imagePath), fileUri.getUriFromPath(videoPath));
-      return [imagePath, videoPath];
-    } catch (error) {
-      await this.removeAll([imagePath, videoPath]);
-      throw error as Error;
-    }
-  }
-
-  private async assetForUri(uri: string): Promise<photoAccessHelper.PhotoAsset | undefined> {
-    let result: photoAccessHelper.FetchResult<photoAccessHelper.PhotoAsset> | undefined = undefined;
-    try {
-      const helper: photoAccessHelper.PhotoAccessHelper = photoAccessHelper.getPhotoAccessHelper(this.context);
-      const predicates: dataSharePredicates.DataSharePredicates = new dataSharePredicates.DataSharePredicates();
-      predicates.equalTo(photoAccessHelper.PhotoKeys.URI, uri);
-      // PHOTO_SUBTYPE is not a guaranteed default column. Request it
-      // explicitly or picker/share URIs may be misclassified as still images.
-      result = await helper.getAssets({
-        fetchColumns: [photoAccessHelper.PhotoKeys.PHOTO_SUBTYPE], predicates: predicates
-      });
-      if (result.getCount() <= 0) return undefined;
-      return await result.getFirstObject();
+      source = await fileIo.open(uri, fileIo.OpenMode.READ_ONLY);
+      const size: number = fileIo.statSync(source.fd).size;
+      if (size <= 0) return undefined;
+      const want: number = Math.min(length, Math.max(0, size - offset));
+      if (want <= 0) return undefined;
+      const buffer: ArrayBuffer = new ArrayBuffer(want);
+      fileIo.lseek(source.fd, offset, fileIo.WhenceType.SEEK_SET);
+      let readTotal: number = 0;
+      while (readTotal < want) {
+        const read: number = await fileIo.read(source.fd, buffer, {
+          offset: readTotal, length: want - readTotal
+        });
+        if (read <= 0) break;
+        readTotal += read;
+      }
+      if (readTotal <= 0) return undefined;
+      return new Uint8Array(buffer, 0, readTotal);
     } catch (_) {
       return undefined;
     } finally {
-      try { if (result !== undefined) result.close(); } catch (_) {}
+      try {
+        if (source !== undefined) fileIo.closeSync(source);
+      } catch (_) {}
     }
-  }
-
-  private requestMovingPhoto(asset: photoAccessHelper.PhotoAsset): Promise<photoAccessHelper.MovingPhoto> {
-    return new Promise((resolve: (value: photoAccessHelper.MovingPhoto) => void,
-      reject: (reason?: Error) => void): void => {
-      // MediaAssetManager invokes the callback as a plain native function;
-      // class methods therefore receive no bound `this`. Capture resolve in
-      // an arrow closure so callback dispatch can never dereference an
-      // undefined handler instance (the previous implementation crashed).
-      const handler: photoAccessHelper.MediaAssetDataHandler<photoAccessHelper.MovingPhoto> = {
-        onDataPrepared: (data: photoAccessHelper.MovingPhoto): void => resolve(data)
-      };
-      photoAccessHelper.MediaAssetManager.requestMovingPhoto(this.context, asset,
-        { deliveryMode: photoAccessHelper.DeliveryMode.HIGH_QUALITY_MODE }, handler)
-        .catch((): void => reject(new Error('MOVING_PHOTO_REQUEST_FAILED')));
-    });
-  }
-
-  private appendFindings(target: PrivacyFinding[], source: PrivacyFinding[], prefix: string): void {
-    for (let index: number = 0; index < source.length; index++) {
-      source[index].id = `${prefix}${source[index].id}`;
-      source[index].category = FindingCategory.METADATA;
-      target.push(source[index]);
-    }
-  }
-
-  private async removeAll(paths: string[]): Promise<void> {
-    for (let index: number = 0; index < paths.length; index++) await this.tempFiles.remove(paths[index]);
   }
 }

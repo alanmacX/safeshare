@@ -17,3 +17,9 @@ build-profile.json5
 *.p12
 *.p7b
 *.cer
+
+# Local agent / editor noise
+.mimocode/
+.clangd
+.clang-tidy
+entry/.test/

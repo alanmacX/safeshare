@@ -12,6 +12,7 @@ import { GifMetadata, GifMetadataSummary } from './GifMetadata';
 import { ContainerMetadata, ContainerMetadataSummary } from './ContainerMetadata';
 import { JpegMetadata } from './JpegMetadata';
 import { TiffMetadata, TiffMetadataSummary } from './TiffMetadata';
+import { HeifMetadata } from './HeifMetadata';
 
 import { runRedaction } from '../privacy/RedactionTask';
 import { hilog } from '@kit.PerformanceAnalysisKit';
@@ -191,16 +192,16 @@ export class MetadataSanitizer {
       flowLog('img_source_info');
       await this.collectPreservedMetadata(source, policy, preserved);
       flowLog('img_collect_props');
-      packer = image.createImagePacker();
-      outputMimeType = this.chooseOutputMimeType(sourceInfo.mimeType, packer.supportedFormats);
-      outputUtd = this.utdForMimeType(outputMimeType);
       let sourceName: string = uri;
       try { sourceName = sourceFile.name; } catch (_) {}
-      outputPath = manager.createOutputPath(sourceName, this.extensionForMimeType(outputMimeType));
       // Metadata-only cleaning must not decode and re-encode the image. Besides
       // avoiding generational JPEG/HEIF loss, an exact container copy keeps
       // HDR gain maps and other auxiliary images owned by the system camera.
+      // Do this BEFORE choosing a packer output format: some devices lack a
+      // HEIF encoder even though the in-place metadata path does not need one.
       if (!hasVisualEdit && this.supportsInPlaceMetadata(sourceInfo.mimeType)) {
+        outputPath = manager.createOutputPath(sourceName,
+          this.extensionForMimeType(sourceInfo.mimeType));
         await this.copySourceToPath(sourceFile, outputPath);
         let jpegProtected: Uint8Array | undefined = undefined;
         if (sourceInfo.mimeType === 'image/png') {
@@ -211,13 +212,19 @@ export class MetadataSanitizer {
           const cleaned: Uint8Array = JpegMetadata.sanitize(copied);
           jpegProtected = JpegMetadata.protectedMediaBytes(cleaned);
           await this.writeFileBytes(outputPath, cleaned);
+        } else if (sourceInfo.mimeType === 'image/heif' || sourceInfo.mimeType === 'image/heic') {
+          const copied: Uint8Array = await this.readPathBytes(outputPath);
+          if (HeifMetadata.isHeif(copied)) {
+            await this.writeFileBytes(outputPath, HeifMetadata.sanitize(copied));
+          }
         }
-        // JPEG/PNG container rewriting has already removed the source's
+        // JPEG/PNG/HEIF container rewriting has already removed the source's
         // privacy metadata. Do not submit `null` values to ImageKit: API 24
         // rejects them as unsupported property values. Only add explicitly
         // preserved/replacement values back to these clean containers.
         const containerAlreadyClean: boolean = sourceInfo.mimeType === 'image/jpeg' ||
-          sourceInfo.mimeType === 'image/png';
+          sourceInfo.mimeType === 'image/png' ||
+          sourceInfo.mimeType === 'image/heif' || sourceInfo.mimeType === 'image/heic';
         await this.applyMetadataPolicyInPlace(outputPath, policy, preserved, containerAlreadyClean);
         if (jpegProtected !== undefined) {
           const afterExifWrite: Uint8Array = JpegMetadata.protectedMediaBytes(
@@ -241,6 +248,10 @@ export class MetadataSanitizer {
         flowLog('img_metadata_copy_done');
         return lossless;
       }
+      packer = image.createImagePacker();
+      outputMimeType = this.chooseOutputMimeType(sourceInfo.mimeType, packer.supportedFormats);
+      outputUtd = this.utdForMimeType(outputMimeType);
+      outputPath = manager.createOutputPath(sourceName, this.extensionForMimeType(outputMimeType));
       pixelMap = await source.createPixelMap({
         editable: hasVisualEdit,
         desiredPixelFormat: image.PixelMapFormat.RGBA_8888
@@ -290,7 +301,7 @@ export class MetadataSanitizer {
         sanitized.byteSize = 0;
       }
       return sanitized;
-    } catch (_) {
+    } catch (error) {
       if (output !== undefined) {
         try {
           fileIo.closeSync(output);
@@ -300,6 +311,14 @@ export class MetadataSanitizer {
       }
       if (outputPath.length > 0) {
         await manager.remove(outputPath);
+      }
+      const stage: string = (error as Error).message;
+      // Keep stage-coded causes so the UI can show the honest failure.
+      if (stage === 'GIF_VISUAL_EDIT_UNSUPPORTED' || stage === 'MULTI_FRAME_IMAGE' ||
+        stage === 'UNSUPPORTED_IMAGE_OUTPUT' || stage.indexOf('metadata remained') >= 0 ||
+        stage.indexOf('does not match the selected policy') >= 0 ||
+        stage.indexOf('media or HDR payload changed') >= 0) {
+        throw new Error(stage);
       }
       throw new Error('Unable to create a verified sanitized copy.');
     } finally {
@@ -546,9 +565,15 @@ export class MetadataSanitizer {
     if (policy.mode === MetadataMode.DEEP_CLEAN) return;
     if (policy.mode === MetadataMode.CUSTOM) {
       if (policy.captureTime.trim().length > 0) {
+        // mat2/exiftool keep all three capture clocks in sync; writing only
+        // DateTimeOriginal leaves DateTime/Digitized stale for other tools.
         this.appendReplacement(preserved, image.PropertyKey.DATE_TIME_ORIGINAL, policy.captureTime);
+        this.appendReplacement(preserved, image.PropertyKey.DATE_TIME, policy.captureTime);
+        this.appendReplacement(preserved, image.PropertyKey.DATE_TIME_DIGITIZED, policy.captureTime);
       } else if (policy.preserveCaptureTime) {
         await this.collectProperty(source, image.PropertyKey.DATE_TIME_ORIGINAL, preserved);
+        await this.collectProperty(source, image.PropertyKey.DATE_TIME, preserved);
+        await this.collectProperty(source, image.PropertyKey.DATE_TIME_DIGITIZED, preserved);
       }
     }
     if (policy.mode === MetadataMode.CUSTOM && policy.preserveCameraInfo) {
@@ -622,6 +647,12 @@ export class MetadataSanitizer {
   }
 
   private appendSubtypeReplacement(values: MetadataValue[], subtype: string, value: string): void {
+    if (subtype === 'CAPTURE_TIME') {
+      this.appendReplacement(values, image.PropertyKey.DATE_TIME_ORIGINAL, value);
+      this.appendReplacement(values, image.PropertyKey.DATE_TIME, value);
+      this.appendReplacement(values, image.PropertyKey.DATE_TIME_DIGITIZED, value);
+      return;
+    }
     if (subtype === 'GPS') {
       const coordinates: string[] = value.split('|');
       if (coordinates.length !== 2) return;

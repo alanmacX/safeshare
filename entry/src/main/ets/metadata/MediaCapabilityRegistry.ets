@@ -51,6 +51,18 @@ export class MediaCapabilityRegistry {
     if (kind === FileKind.AUDIO_VIDEO) {
       if (readOnly) return new MediaCapability('audio-readonly', '音频', SupportGrade.READ_ONLY,
         true, false, false, false, false, false, false, '当前容器仅检查，不生成清理副本');
+      if (mimeType === 'audio/mpeg') {
+        return new MediaCapability('mp3', 'MP3', SupportGrade.LIMITED,
+          true, true, false, false, false, false, false, '剥离 ID3v2/ID3v1/APE 标签，保留音频帧');
+      }
+      if (mimeType === 'audio/flac') {
+        return new MediaCapability('flac', 'FLAC', SupportGrade.LIMITED,
+          true, true, false, false, false, false, false, '保留 STREAMINFO，剥离 Vorbis Comment/封面图');
+      }
+      if (mimeType === 'audio/wav' || mimeType === 'audio/x-wav') {
+        return new MediaCapability('wav', 'WAV', SupportGrade.LIMITED,
+          true, true, false, false, false, false, false, '保留 fmt/data，剥离 LIST INFO/bext/iXML');
+      }
       return new MediaCapability(mimeType === 'audio/mp4' ? 'm4a' : 'video',
         mimeType === 'audio/mp4' ? 'M4A' : '视频', SupportGrade.LIMITED,
         true, true, false, false, false, false, false, '复制编码轨道并移除容器元数据');
@@ -76,7 +88,8 @@ export class MediaCapabilityRegistry {
     }
     if (mime === 'image/heif' || mime === 'image/heic') {
       return new MediaCapability('heif', 'HEIF/HEIC', SupportGrade.LIMITED,
-        true, true, true, false, false, false, false, '为保留 HDR/辅助图，当前仅处理元数据');
+        true, true, true, false, false, false, false,
+        '清 HEIF Exif/XMP item 并写回替换值；为保留 HDR/辅助图不重编码');
     }
     if (mime === 'image/jpeg') return new MediaCapability('jpeg', 'JPEG', SupportGrade.IMPLEMENTED,
       true, true, true, true, true, true, true);
@@ -91,8 +104,8 @@ export class MediaCapabilityRegistry {
   }
 
   static movingPhoto(): MediaCapability {
-    return new MediaCapability('moving-photo', '动态照片', SupportGrade.LIMITED,
-      true, true, true, false, false, false, false, '保留动态效果；仅处理封面与视频元数据');
+    return new MediaCapability('moving-photo', '动态照片', SupportGrade.UNSUPPORTED,
+      false, false, false, false, false, false, false, '暂不支持动态照片，请选择普通静态图片');
   }
 
   static supportCatalog(): MediaCapability[] {
@@ -103,7 +116,6 @@ export class MediaCapabilityRegistry {
       MediaCapabilityRegistry.image('image/gif', true),
       MediaCapabilityRegistry.image('image/webp', true),
       MediaCapabilityRegistry.image('image/tiff', false),
-      MediaCapabilityRegistry.movingPhoto(),
       MediaCapabilityRegistry.forResult(FileKind.AUDIO_VIDEO, 'video/mp4'),
       MediaCapabilityRegistry.forResult(FileKind.AUDIO_VIDEO, 'audio/mpeg', false, false, true),
       MediaCapabilityRegistry.forResult(FileKind.PDF),
