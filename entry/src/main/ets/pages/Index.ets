@@ -3463,6 +3463,20 @@ struct Index {
       }.width('100%').padding({ bottom: 14 })
       Scroll() {
         Column({ space: 18 }) {
+          this.supportSection('支持的格式', [
+            new SupportTypeItem($r('sys.symbol.doc_text'), 'Word', '.docx .docm .dotx .dotm',
+              '清理文档属性', '支持', true),
+            new SupportTypeItem($r('sys.symbol.doc_plaintext'), 'Excel', '.xlsx .xlsm .xltx .xltm',
+              '清理文档属性', '支持', true),
+            new SupportTypeItem($r('sys.symbol.doc_text_2'), 'PowerPoint', '.pptx .pptm .potx .potm .ppsx .ppsm',
+              '清理文档属性', '支持', true),
+            new SupportTypeItem($r('sys.symbol.doc_text'), 'PDF', '.pdf',
+              '清理文档属性；可选整页水印', '支持', true),
+            new SupportTypeItem($r('sys.symbol.movie'), '视频', '.mp4 .mov',
+              '清理容器元数据', '支持', true),
+            new SupportTypeItem($r('sys.symbol.music_note_list'), '音频', '.mp3 · .m4a · .flac · .wav',
+              '剥离音频标签', '支持', true)
+          ])
           this.supportSection('仅检查', [
             new SupportTypeItem($r('sys.symbol.music_note_list'), '其他音频', '.ogg .opus .aac .amr',
               '不生成清理副本', '仅检查', false)
